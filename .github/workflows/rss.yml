@@ -1,0 +1,58 @@
+name: FB Reels RSS
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"     # setiap 2 jam (UTC). Tukar ke "17 * * * *" untuk setiap jam.
+  workflow_dispatch: {}
+
+concurrency:
+  group: fb-reels-rss
+  cancel-in-progress: false
+
+jobs:
+  rss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pasang pakej
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Sediakan cookies (pilihan)
+        env:
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
+        if: env.FB_COOKIES != ''
+        run: printf '%s' "$FB_COOKIES" > cookies.txt && echo "COOKIES_FILE=cookies.txt" >> "$GITHUB_ENV"
+
+      - name: Jana RSS
+        env:
+          FB_PAGE_URL: ${{ vars.FB_PAGE_URL || 'https://www.facebook.com/penmerahdotcoms/reels/' }}
+          MAX_REELS: ${{ vars.MAX_REELS || '10' }}
+          KEEP_ITEMS: ${{ vars.KEEP_ITEMS || '30' }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PREFIX: ${{ vars.R2_PREFIX || 'rss/' }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        run: python fb_reels_rss.py
+
+      - name: Simpan maklumat diagnostik
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-${{ github.run_number }}
+          path: |
+            debug/
+            out/
+          retention-days: 7
+          if-no-files-found: ignore
