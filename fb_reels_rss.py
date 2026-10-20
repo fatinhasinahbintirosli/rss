@@ -239,8 +239,33 @@ def r2_put(client, bucket: str, key: str, body: bytes, content_type: str) -> Non
 DEFAULT_PAGES = "https://www.facebook.com/penmerahdotcoms/reels/,https://www.facebook.com/buletinmalaysiakuu/reels/"
 
 
-def page_list() -> list[str]:
-    """FB_PAGE_URLS: comma or newline separated. FB_PAGE_URL (single) still works."""
+def postolab_sources(fetch=None) -> list[str]:
+    """Gabungan sumber RSS semua profile yang aktif di halaman Auto Reels (Postolab). [] jika tiada/ralat."""
+    if not env("POSTOLAB_API_KEY"):
+        return []
+    try:
+        if fetch is None:
+            from postolab_relay import Postolab
+            fetch = Postolab(env("POSTOLAB_URL", "https://postolab.com").rstrip("/"), env("POSTOLAB_API_KEY")).remote
+        remote = fetch()
+    except Exception as e:
+        print(f"Tidak dapat baca sumber dari Postolab ({e}); guna FB_PAGE_URLS.")
+        return []
+    if not remote:
+        return []
+    out = []
+    for pc in (remote.get("settings") or {}).get("profiles", {}).values():
+        if pc.get("enabled"):
+            out += [u for u in pc.get("sources") or [] if u not in out]
+    return out
+
+
+def page_list(fetch=None) -> list[str]:
+    """Sumber dari halaman Auto Reels Postolab jika ada; jika tidak FB_PAGE_URLS (koma / baris baru)."""
+    remote = postolab_sources(fetch)
+    if remote:
+        print(f"Sumber dari Postolab Auto Reels: {len(remote)} page")
+        return remote
     raw = env("FB_PAGE_URLS") or env("FB_PAGE_URL") or DEFAULT_PAGES
     return [u.strip() for u in re.split(r"[,\n]", raw) if u.strip()]
 

@@ -11,7 +11,9 @@ Larian (GitHub Actions, selepas RSS dijana):
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
+import re
 import html
 import json
 import os
@@ -65,13 +67,15 @@ class Cfg:
             "FORCE_BLOCK", "visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing").split(",")
             if x.strip()}
         self.allow_warn -= self.force_block
+        self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
+        self.target_ids = None        # set page_id dipilih (None = semua page)
+        self.sources = None           # set slug sumber RSS profile (None = semua sumber)
         self.state_key = f"{env('R2_PREFIX', 'rss/')}relay_state.json"
         self.report_key = f"{env('R2_PREFIX', 'rss/')}laporan.html"
 
 
 # ------------------------------------------------------------------ RSS
 def parse_feed(xml_text: str) -> list[dict]:
-    import re
     root = ET.fromstring(xml_text)
     out = []
     for it in root.iter("item"):
@@ -83,8 +87,10 @@ def parse_feed(xml_text: str) -> list[dict]:
         desc = html.unescape(it.findtext("description") or "")
         cm = re.search(r"Kapsyen Penuh:</b><br/>(.*?)</p>", desc, re.S)
         caption = html.unescape(re.sub(r"<[^>]+>", "", (cm.group(1) if cm else "").replace("<br/>", "\n"))).strip()
+        tm = re.search(r'<img[^>]+src="([^"]+)"', desc)
         out.append({"id": m.group(1), "url": link, "mp4": html.unescape(enc.get("url")),
-                    "source": (it.findtext("category") or "").strip().lower(), "caption": caption})
+                    "source": (it.findtext("category") or "").strip().lower(), "caption": caption,
+                    "thumb": html.unescape(tm.group(1)) if tm else ""})
     return out
 
 
@@ -133,9 +139,24 @@ class Postolab:
             raise RuntimeError(f"Upload R2 gagal: {r.status_code} {r.text[:200]}")
         return j["publicUrl"]
 
-    def schedule(self, video_url: str, source_id: str, posts: list[dict], profile: str, stagger: int) -> dict:
-        return self._check(self.s.post(f"{self.base}/api/external/videos", headers=self.h, timeout=60, json={
-            "videoUrl": video_url, "sourceId": source_id, "posts": posts, "profile": profile, "stagger": stagger}))
+    def schedule(self, video_url: str, source_id: str, posts: list[dict], profile: str, stagger: int,
+                 slots: dict | None = None) -> dict:
+        body = {"videoUrl": video_url, "sourceId": source_id, "posts": posts, "profile": profile, "stagger": stagger}
+        if slots:
+            body["slots"] = slots
+        return self._check(self.s.post(f"{self.base}/api/external/videos", headers=self.h, timeout=60, json=body))
+
+    # Halaman Auto Reels di Postolab: tetapan setiap profile + keputusan semakan.
+    def remote(self) -> dict | None:
+        """None jika Postolab belum ada /api/external/auto-reels (belum deploy)."""
+        r = self.s.get(f"{self.base}/api/external/auto-reels", headers=self.h, timeout=30)
+        if r.status_code == 404:
+            return None
+        return self._check(r)
+
+    def save_items(self, items: list[dict]) -> None:
+        self._check(self.s.post(f"{self.base}/api/external/auto-reels", headers=self.h, timeout=30,
+                                json={"items": items}))
 
 
 # ------------------------------------------------------------------ state + report (R2)
@@ -237,10 +258,11 @@ def gemini_ask_factory(settings: Settings, path: str):
 
 
 def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, state: dict, api: Postolab,
-                 checker=check_video, ask_factory=gemini_ask_factory, log=print) -> dict:
+                 checker=check_video, ask_factory=gemini_ask_factory, log=print, cache: dict | None = None) -> dict:
     rec = {"source": item["source"], "at": dt.datetime.now(dt.timezone.utc).isoformat(), "reasons": []}
     targets = [p for p in pages if str(p["page_id"]) not in cfg.exclude
-               and str(p["page_id"]) not in cfg.source_map.get(item["source"], set())]
+               and str(p["page_id"]) not in cfg.source_map.get(item["source"], set())
+               and (cfg.target_ids is None or str(p["page_id"]) in cfg.target_ids)]
     if not targets:
         rec.update(status="skipped", summary="Tiada Page sasaran (semua dikecualikan).")
         return rec
@@ -249,10 +271,16 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
         path = os.path.join(td, f"{item['id']}.mp4")
         download(item["mp4"], path)
         # Caption asal TIDAK dipost (diganti caption baru yang disemak berasingan), jadi semak video sahaja.
-        report = checker(path, "", "video", settings, layers=checker_layers(settings))
-        extra = extra_findings(path)
-        if extra:
-            report.layers[0].findings.extend(extra)
+        # Reel yang sama untuk beberapa profile: semak sekali sahaja dalam satu larian.
+        if cache is not None and item["id"] in cache:
+            report = copy.deepcopy(cache[item["id"]])
+        else:
+            report = checker(path, "", "video", settings, layers=checker_layers(settings))
+            extra = extra_findings(path)
+            if extra:
+                report.layers[0].findings.extend(extra)
+            if cache is not None:
+                cache[item["id"]] = copy.deepcopy(report)
         accepted = []
         for f in report.findings:
             if f.code.split(":")[0] in cfg.force_block:
@@ -270,7 +298,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
                 rec["approve_refused"] = hard_stop
             else:
                 rec["approved_manually"] = True
-                report.verdict, report.summary = "green", "Diluluskan secara manual (APPROVE_IDS)."
+                report.verdict, report.summary = "green", "Diluluskan secara manual."
         rec["verdict"], rec["summary"] = report.verdict, report.summary
         rec["reasons"] = [f"[{f.severity}] ({f.code.split(':')[0]}) {f.message} {f.evidence}".strip()
                           for f in report.findings if f.severity in ("block", "warn")][:8]
@@ -300,7 +328,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             return rec
         video_url = api.upload(path)
 
-    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger)
+    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger, cfg.slots)
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
@@ -312,6 +340,136 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
 
 
 # ------------------------------------------------------------------ main
+NOT_POSTED = ("yellow", "red", "error", "skipped")
+
+
+def select_todo(feed: list[dict], done: dict, approve_ids: set, recheck: bool, limit: int) -> list[dict]:
+    """Reel baru, ditambah reel yang belum pernah dipost tetapi kini diluluskan (APPROVE_IDS)
+    atau disemak semula (RECHECK=1). Reel yang sudah dipost tidak akan diproses lagi."""
+    def eligible(it):
+        prev = done.get(it["id"])
+        if prev is None:
+            return True
+        if prev.get("status") not in NOT_POSTED:
+            return False
+        return it["id"] in approve_ids or recheck
+    picked = [it for it in feed if eligible(it)]
+    picked.sort(key=lambda it: 0 if it["id"] in approve_ids else 1)   # yang diluluskan didahulukan
+    return picked[:limit]
+
+
+# ------------------------------------------------------------------ mod halaman Auto Reels (setiap profile)
+def source_slug(url: str) -> str:
+    m = re.search(r"facebook\.com/([^/?#]+)", url or "")
+    return re.sub(r"[^a-zA-Z0-9_-]", "", m.group(1)).lower() if m else ""
+
+
+def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
+    c = copy.copy(base)
+    c.profile, c.dry_run, c.yellow_mode = name, bool(gl.get("dry_run", True)), "skip"
+    c.stagger = int(pc.get("stagger") or 0)
+    c.slots = pc.get("slots") or None
+    c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
+    c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
+                    if pc.get("target_mode") == "selected" else None)
+    c.sources = {source_slug(u) for u in pc.get("sources") or []} - {""}
+    c.approve_ids = {rid for (prof, rid), row in rows.items() if prof == name and row.get("status") == "approved"}
+    return c
+
+
+def remote_eligible(row: dict | None, dry_run: bool) -> bool:
+    if row is None:
+        return True
+    st = row.get("status")
+    if st == "approved":
+        return not dry_run           # diluluskan: dipost bila mod percubaan dimatikan
+    if st in ("rejected", "posted"):
+        return False
+    if row.get("dry_run") and not dry_run:
+        return True                  # keputusan mod percubaan: semak semula dalam mod sebenar
+    if st == "error":
+        return int(row.get("tries") or 0) < 3
+    return False
+
+
+def plan_jobs(feed: list[dict], cfgs: list[Cfg], rows: dict, limit: int) -> list[tuple[Cfg, dict]]:
+    """Senarai (profile, reel). Yang diluluskan didahulukan; profile bergilir; had = bilangan reel unik."""
+    queues = []
+    for c in cfgs:
+        q = [it for it in feed if it["source"] in c.sources
+             and remote_eligible(rows.get((c.profile, it["id"])), c.dry_run)]
+        q.sort(key=lambda it: 0 if it["id"] in c.approve_ids else 1)
+        queues.append([(c, it) for it in q])
+    jobs, seen = [], set()
+    while any(queues):
+        for q in queues:
+            if not q:
+                continue
+            c, it = q[0]
+            if it["id"] not in seen and len(seen) >= limit:
+                q.clear()
+                continue
+            q.pop(0)
+            seen.add(it["id"])
+            jobs.append((c, it))
+    return jobs
+
+
+def to_row(c: Cfg, item: dict, rec: dict, tries: int = 0) -> dict:
+    return {
+        "profile": c.profile, "reel_id": item["id"], "status": rec["status"], "source": item["source"],
+        "reel_url": item.get("url"), "thumb_url": item.get("thumb"), "verdict": rec.get("verdict"),
+        "summary": rec.get("summary", ""), "reasons": rec.get("reasons", []), "scheduled": rec.get("scheduled", []),
+        "detail": {k: rec[k] for k in ("accepted", "approved_manually", "approve_refused", "caption_rejected")
+                   if rec.get(k)},
+        "dry_run": c.dry_run, "tries": tries,
+    }
+
+
+def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed: list[dict], pages: list[dict],
+               process=process_reel) -> list[tuple[Cfg, dict, dict]]:
+    gl = remote.get("settings") or {}
+    if gl.get("paused"):
+        print("Auto Reels DIHENTIKAN SEMENTARA (halaman Auto Reels → Tetapan).")
+        return []
+    rows = {(r["profile"], r["reel_id"]): r for r in remote.get("items") or []}
+    cfgs = [profile_cfg(base, name, gl, pc, rows) for name, pc in (gl.get("profiles") or {}).items()
+            if pc.get("enabled")]
+    if not cfgs:
+        print("Tiada profile diaktifkan di halaman Auto Reels.")
+        return []
+    for c in cfgs:
+        tgt = "semua page" if c.target_ids is None else f"{len(c.target_ids)} page dipilih"
+        print(f"Profile '{c.profile}': sumber {', '.join(sorted(c.sources)) or '-'} | {tgt}")
+    if gl.get("dry_run", True):
+        print("MOD PERCUBAAN: caption dijana tetapi TIADA apa-apa dijadualkan ke Postolab.")
+    state = {"captions": [cap.clean_body(x) for x in remote.get("captions") or []]}
+    cache, done = {}, []
+    jobs = plan_jobs(feed, cfgs, rows, int(gl.get("max_videos_per_run") or base.max_per_run))
+    for i, (c, item) in enumerate(jobs, 1):
+        print(f"[{i}/{len(jobs)}] {item['id']} ({item['source']}) → profile '{c.profile}'")
+        prev = rows.get((c.profile, item["id"])) or {}
+        try:
+            rec = process(item, pages, c, settings, state, api, cache=cache)
+        except Exception as e:
+            rec = {"status": "error", "summary": str(e)[:300], "reasons": []}
+        tries = 0
+        if rec["status"] == "error":    # dicuba semula larian seterusnya, maksimum 3 kali
+            tries = (0 if prev.get("dry_run") != c.dry_run else int(prev.get("tries") or 0)) + 1
+            print(f"   ralat (cubaan {tries}/3)")
+        try:
+            api.save_items([to_row(c, item, rec, tries)])
+        except Exception as e:
+            print(f"   gagal simpan keputusan ke Postolab: {e}")
+        done.append((c, item, rec))
+        print(f"   {rec['status'].upper()}: {rec.get('summary', '')}")
+        for s in rec.get("scheduled", []):
+            print(f"     → {s['page']} @ {s['when']}: {s['message']}")
+    if not jobs:
+        print("Tiada reel baru untuk profile yang aktif.")
+    return done
+
+
 def run() -> int:
     cfg, settings = Cfg(), Settings()
     if not cfg.postolab_key:
@@ -321,16 +479,24 @@ def run() -> int:
         print("GEMINI_API_KEY belum diset.", file=sys.stderr)
         return 2
     settings.visual_provider = "gemini"
-
-    client = r2() if env("R2_BUCKET") else None
-    store = Store(client, env("R2_BUCKET"), cfg.state_key)
-    state = store.load()
     api = Postolab(cfg.postolab_base, cfg.postolab_key)
 
     r = requests.get(cfg.rss_url, timeout=30, headers={"User-Agent": UA})
     r.raise_for_status()
     feed = parse_feed(r.text)
     pages = api.pages()
+
+    remote = api.remote() if env("RELAY_MODE", "auto") != "env" else None
+    if remote is not None:
+        print(f"RSS: {len(feed)} reel | Postolab: {len(pages)} Page | tetapan dari halaman Auto Reels")
+        done = run_remote(cfg, settings, api, remote, feed, pages)
+        _summary_remote(done)
+        return 0
+    print("Halaman Auto Reels belum dipasang di Postolab: guna tetapan env (satu profile).")
+
+    client = r2() if env("R2_BUCKET") else None
+    store = Store(client, env("R2_BUCKET"), cfg.state_key)
+    state = store.load()
     print(f"RSS: {len(feed)} reel | Postolab: {len(pages)} Page | profile '{cfg.profile}'")
     if cfg.source_map:
         known = {pid for ids in cfg.source_map.values() for pid in ids}
@@ -339,13 +505,14 @@ def run() -> int:
         print("SOURCE_PAGE_MAP tidak diset (ok jika page sumber tiada dalam Postolab).")
 
     # Mod percubaan disimpan berasingan: reel yang dicuba masih akan dipost bila DRY_RUN dimatikan.
-    if env("RECHECK", "0") in ("1", "true", "ya"):
+    recheck = env("RECHECK", "0") in ("1", "true", "ya")
+    if recheck and cfg.dry_run:
         print("RECHECK=1: keputusan mod percubaan lama dikosongkan.")
         state["dry"] = {}
     done = state.setdefault("dry", {}) if cfg.dry_run else state["reels"]
     if cfg.dry_run:
         print("MOD PERCUBAAN (DRY_RUN=1): caption dijana tetapi TIADA apa-apa dijadualkan ke Postolab.")
-    todo = [it for it in feed if it["id"] not in done][: cfg.max_per_run]
+    todo = select_todo(feed, done, cfg.approve_ids, recheck and not cfg.dry_run, cfg.max_per_run)
     for i, item in enumerate(todo, 1):
         print(f"[{i}/{len(todo)}] {item['id']} ({item['source']})")
         try:
@@ -371,6 +538,18 @@ def run() -> int:
     store.save(state, cfg.report_key, render_report(state))
     _summary(todo, state)
     return 0
+
+
+def _summary_remote(done):
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("## Auto Reels → Postolab\n\n| Profile | Reel | Status | Sebab / caption |\n|---|---|---|---|\n")
+        for c, it, r in done:
+            detail = "<br>".join(f"{s['page']}: {s['message']}" for s in r.get("scheduled", [])) or r.get("summary", "")
+            f.write(f"| {c.profile} | {it['id']} | {r['status']}{' (percubaan)' if c.dry_run else ''} | "
+                    f"{detail.replace('|', '/')} |\n")
 
 
 def _summary(todo, state):

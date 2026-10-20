@@ -180,7 +180,9 @@ def run(path: str, caption: str, has_audio: bool, frames: list[Frame], screen_te
 
     # d. LLM review
     has_text = bool(caption.strip() or transcript or screen)
-    if settings.text_llm_review and has_text:
+    # A reviewer passed in explicitly (e.g. Gemini, which already watched the video) always runs,
+    # even when there is no caption/transcript text: its findings may come from the audio itself.
+    if settings.text_llm_review and (has_text or text_reviewer is not None):
         if text_reviewer is None and settings.claude_ready():
             text_reviewer = review_text_with_claude
         if text_reviewer is None:

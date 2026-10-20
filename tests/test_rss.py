@@ -74,6 +74,20 @@ class T(unittest.TestCase):
         self.assertTrue(m.LOGIN_WALL.search("Log masuk ke Facebook untuk teruskan"))
 
 
+
+class TestPostolabSources(unittest.TestCase):
+    def test_union_of_enabled_profiles(self):
+        import fb_reels_rss as g
+        os.environ["POSTOLAB_API_KEY"] = "pl_x"
+        self.addCleanup(lambda: os.environ.pop("POSTOLAB_API_KEY", None))
+        remote = {"settings": {"profiles": {
+            "deli": {"enabled": True, "sources": ["https://www.facebook.com/a/reels/", "https://www.facebook.com/b/reels/"]},
+            "dua": {"enabled": True, "sources": ["https://www.facebook.com/b/reels/", "https://www.facebook.com/c/reels/"]},
+            "mati": {"enabled": False, "sources": ["https://www.facebook.com/z/reels/"]}}}}
+        self.assertEqual([u.split("/")[3] for u in g.page_list(lambda: remote)], ["a", "b", "c"])
+        self.assertEqual(len(g.page_list(lambda: None)), 2)           # belum deploy → lalai
+        self.assertEqual(len(g.page_list(lambda: 1 / 0)), 2)          # ralat → lalai
+
 if __name__ == "__main__":
     unittest.main()
 
