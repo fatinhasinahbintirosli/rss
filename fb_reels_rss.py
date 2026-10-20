@@ -45,6 +45,7 @@ class Reel:
     thumb: str = ""
     first_seen: str = ""
     error: str = ""
+    source_page: str = ""
 
 
 @dataclass
@@ -180,12 +181,13 @@ def build_rss(slug: str, page_url: str, reels: list[Reel]) -> str:
         ET.SubElement(it, "link").text = r.url
         ET.SubElement(it, "guid", isPermaLink="true").text = r.url
         ET.SubElement(it, "pubDate").text = r.first_seen
+        src = re.search(r"facebook\.com/([^/]+)/", r.source_page or "")
+        if src:
+            ET.SubElement(it, "category").text = src.group(1)
         d = ""
         if r.thumb:
             d += f'<p><img src="{html.escape(r.thumb)}" style="max-width:400px;"/></p>'
         d += f'<p><b>Kapsyen Penuh:</b><br/>{html.escape(r.caption).replace(chr(10), "<br/>")}</p>'
-        if r.caption_truncated:
-            d += "<p><i>(kapsyen terpotong)</i></p>"
         if r.mp4:
             d += (f'<p><b>Pautan Direct MP4:</b><br/><a href="{html.escape(r.mp4)}">🔗 Muat Turun / Main Fail MP4</a>'
                   + (f" ({r.width}x{r.height})" if r.width and r.height else "") + "</p>")
@@ -234,21 +236,22 @@ def r2_put(client, bucket: str, key: str, body: bytes, content_type: str) -> Non
 
 
 # ------------------------------------------------------------------ main
-def run() -> int:
-    page_url, slug = normalize_reels_url(env("FB_PAGE_URL", "https://www.facebook.com/penmerahdotcoms/reels/"))
-    max_items = int(env("MAX_REELS", "10"))
-    keep = int(env("KEEP_ITEMS", "30"))
-    proxy = env("PROXY_URL")
-    debug_dir = env("DEBUG_DIR", "debug")
-    cookiefile = env("COOKIES_FILE")
-    bucket = env("R2_BUCKET")
-    prefix = env("R2_PREFIX", "rss/")
-    public_base = env("R2_PUBLIC_BASE_URL").rstrip("/")
+DEFAULT_PAGES = "https://www.facebook.com/penmerahdotcoms/reels/,https://www.facebook.com/buletinmalaysiakuu/reels/"
 
+
+def page_list() -> list[str]:
+    """FB_PAGE_URLS: comma or newline separated. FB_PAGE_URL (single) still works."""
+    raw = env("FB_PAGE_URLS") or env("FB_PAGE_URL") or DEFAULT_PAGES
+    return [u.strip() for u in re.split(r"[,\n]", raw) if u.strip()]
+
+
+def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], str]:
+    page_url, slug = normalize_reels_url(raw_url)
+    debug_dir = os.path.join(cfg["debug_dir"], slug)
     rep = RunReport(page_url=page_url, started=dt.datetime.now(dt.timezone.utc).isoformat())
-    print(f"[1/3] Buka {page_url}")
+    print(f"\n=== {slug} ===\n[1/3] Buka {page_url}")
     try:
-        urls, signals = list_reel_urls(page_url, max_items, proxy, debug_dir)
+        urls, signals = list_reel_urls(page_url, cfg["max_items"], cfg["proxy"], debug_dir)
     except Exception as e:
         urls, signals = [], [f"Playwright gagal: {e}"[:300]]
     rep.reel_links_found, rep.blocked_signals = len(urls), signals
@@ -256,11 +259,11 @@ def run() -> int:
 
     reels: list[Reel] = []
     for i, u in enumerate(urls, 1):
-        r = extract_reel(u, proxy, cookiefile)
+        r = extract_reel(u, cfg["proxy"], cfg["cookiefile"])
+        r.source_page = page_url
         size = f"{r.width}x{r.height}" if r.height else "?"
         print(f"[2/3] {i}/{len(urls)} {r.id}: mp4={'ya' if r.mp4 else 'TIADA'} ({size}) "
-              f"caption={len(r.caption)} aksara{' (terpotong)' if r.caption_truncated else ''}"
-              + (f" ralat={r.error}" if r.error else ""))
+              f"caption={len(r.caption)} aksara" + (f" ralat={r.error}" if r.error else ""))
         if r.error:
             rep.errors.append(f"{r.id}: {r.error}")
         reels.append(r)
@@ -268,15 +271,14 @@ def run() -> int:
     rep.with_mp4 = sum(1 for r in reels if r.mp4)
     rep.with_caption = sum(1 for r in reels if r.caption)
 
-    client = r2_client() if bucket else None
+    prefix, bucket = cfg["prefix"], cfg["bucket"]
     state_key, xml_key = f"{prefix}{slug}.json", f"{prefix}{slug}.xml"
     previous = [Reel(**d) for d in r2_get_json(client, bucket, state_key)] if client else []
     if not reels and previous:
         print("[3/3] Tiada reel diperoleh kali ini. RSS lama dikekalkan (tidak ditimpa).")
-        _write_report(rep, debug_dir)
-        return 2
+        return rep, previous, slug
 
-    merged = merge_with_previous(reels, previous, keep)
+    merged = merge_with_previous(reels, previous, cfg["keep"])
     xml = build_rss(slug, page_url, merged)
     os.makedirs("out", exist_ok=True)
     with open(f"out/{slug}.xml", "w", encoding="utf-8") as f:
@@ -285,32 +287,74 @@ def run() -> int:
         r2_put(client, bucket, xml_key, xml.encode("utf-8"), "application/rss+xml; charset=utf-8")
         r2_put(client, bucket, state_key, json.dumps([asdict(r) for r in merged], ensure_ascii=False).encode(),
                "application/json")
-        rep.uploaded_to = f"{public_base}/{xml_key}" if public_base else f"r2://{bucket}/{xml_key}"
+        rep.uploaded_to = f"{cfg['public_base']}/{xml_key}" if cfg["public_base"] else f"r2://{bucket}/{xml_key}"
         print(f"[3/3] RSS dikemas kini: {rep.uploaded_to}")
     else:
         print(f"[3/3] R2 tidak diset. RSS disimpan di out/{slug}.xml")
-
-    _write_report(rep, debug_dir)
-    # Non-zero exit makes the GitHub run show red when Facebook blocked us, so it's easy to spot.
-    return 0 if rep.with_mp4 else 3
+    return rep, merged, slug
 
 
-def _write_report(rep: RunReport, debug_dir: str) -> None:
+def _pub_ts(r: Reel) -> float:
+    try:
+        return dt.datetime.strptime(r.first_seen, "%a, %d %b %Y %H:%M:%S GMT").timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def run() -> int:
+    cfg = {
+        "max_items": int(env("MAX_REELS", "10")),
+        "keep": int(env("KEEP_ITEMS", "30")),
+        "proxy": env("PROXY_URL"),
+        "debug_dir": env("DEBUG_DIR", "debug"),
+        "cookiefile": env("COOKIES_FILE"),
+        "bucket": env("R2_BUCKET"),
+        "prefix": env("R2_PREFIX", "rss/"),
+        "public_base": env("R2_PUBLIC_BASE_URL").rstrip("/"),
+    }
+    client = r2_client() if cfg["bucket"] else None
+
+    reports: list[RunReport] = []
+    combined: list[Reel] = []
+    for url in page_list():
+        rep, items, slug = run_page(url, client, cfg)
+        reports.append(rep)
+        combined.extend(items)
+
+    # One feed with every page's reels, newest first (what the checker will read).
+    combined.sort(key=_pub_ts, reverse=True)
+    xml = build_rss("semua", "", combined)
+    os.makedirs("out", exist_ok=True)
+    with open("out/semua.xml", "w", encoding="utf-8") as f:
+        f.write(xml)
+    if client and combined:
+        r2_put(client, cfg["bucket"], f"{cfg['prefix']}semua.xml", xml.encode("utf-8"),
+               "application/rss+xml; charset=utf-8")
+        link = (f"{cfg['public_base']}/{cfg['prefix']}semua.xml" if cfg["public_base"]
+                else f"r2://{cfg['bucket']}/{cfg['prefix']}semua.xml")
+        print(f"\nRSS gabungan ({len(combined)} item): {link}")
+
+    _write_report(reports, cfg["debug_dir"])
+    # Red run in GitHub when any page got no mp4 at all, so a block is easy to spot.
+    return 0 if all(r.with_mp4 for r in reports) else 3
+
+
+def _write_report(reports: list[RunReport], debug_dir: str) -> None:
     os.makedirs(debug_dir, exist_ok=True)
     with open(os.path.join(debug_dir, "report.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(rep), f, ensure_ascii=False, indent=2)
+        json.dump([asdict(r) for r in reports], f, ensure_ascii=False, indent=2)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as f:
-            f.write("## Keputusan larian\n\n")
-            f.write(f"| | |\n|---|---|\n| Pautan reel dijumpai | {rep.reel_links_found} |\n"
-                    f"| Ada mp4 | {rep.with_mp4} |\n| Ada caption | {rep.with_caption} |\n")
-            if rep.uploaded_to:
-                f.write(f"| RSS | {rep.uploaded_to} |\n")
-            if rep.blocked_signals:
-                f.write("\n**Tanda disekat:** " + "; ".join(rep.blocked_signals) + "\n")
-            if rep.errors:
-                f.write("\n**Ralat yt-dlp:**\n" + "\n".join(f"- {e}" for e in rep.errors[:10]) + "\n")
+    if not summary:
+        return
+    with open(summary, "a", encoding="utf-8") as f:
+        f.write("## Keputusan larian\n\n| Page | Pautan reel | Ada mp4 | Ada caption | RSS |\n|---|---|---|---|---|\n")
+        for r in reports:
+            f.write(f"| {r.page_url} | {r.reel_links_found} | {r.with_mp4} | {r.with_caption} | {r.uploaded_to} |\n")
+        for r in reports:
+            if r.blocked_signals:
+                f.write(f"\n**{r.page_url} - tanda disekat:** " + "; ".join(r.blocked_signals) + "\n")
+            if r.errors:
+                f.write(f"\n**{r.page_url} - ralat yt-dlp:**\n" + "\n".join(f"- {e}" for e in r.errors[:10]) + "\n")
 
 
 if __name__ == "__main__":
