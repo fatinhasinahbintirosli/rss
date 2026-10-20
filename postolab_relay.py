@@ -367,8 +367,10 @@ def source_slug(url: str) -> str:
 def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
     c = copy.copy(base)
     c.profile, c.dry_run, c.yellow_mode = name, bool(gl.get("dry_run", True)), "skip"
-    c.stagger = int(pc.get("stagger") or 0)
-    c.slots = pc.get("slots") or None
+    if pc.get("slot_mode") == "custom":
+        c.stagger, c.slots = int(pc.get("stagger") or 0), pc.get("slots") or None
+    else:                            # ikut menu Time Slots profile di Postolab
+        c.stagger, c.slots = 0, {"source": "profile"}
     c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
     c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
                     if pc.get("target_mode") == "selected" else None)
