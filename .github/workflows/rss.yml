@@ -56,3 +56,45 @@ jobs:
             out/
           retention-days: 7
           if-no-files-found: ignore
+
+  relay:
+    needs: rss
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pasang ffmpeg dan pakej
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -r requirements.txt
+
+      - name: Semak video dan jadual ke Postolab
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PREFIX: ${{ vars.R2_PREFIX || 'rss/' }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          POSTOLAB_URL: ${{ vars.POSTOLAB_URL || 'https://postolab.com' }}
+          POSTOLAB_API_KEY: ${{ secrets.POSTOLAB_API_KEY }}
+          POSTOLAB_PROFILE: ${{ vars.POSTOLAB_PROFILE || 'deli' }}
+          SOURCE_PAGE_MAP: ${{ vars.SOURCE_PAGE_MAP }}
+          EXCLUDE_PAGE_IDS: ${{ vars.EXCLUDE_PAGE_IDS }}
+          YELLOW_MODE: ${{ vars.YELLOW_MODE || 'skip' }}
+          MAX_VIDEOS_PER_RUN: ${{ vars.MAX_VIDEOS_PER_RUN || '5' }}
+          STAGGER: ${{ vars.STAGGER || '0' }}
+          DRY_RUN: ${{ vars.DRY_RUN || '1' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          AUDD_API_TOKEN: ${{ secrets.AUDD_API_TOKEN }}
+          VISUAL_PROVIDER: gemini
+          TRANSCRIBE_PROVIDER: none
+        run: python postolab_relay.py
