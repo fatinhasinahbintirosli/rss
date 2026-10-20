@@ -79,9 +79,27 @@ def parse_feed(xml_text: str) -> list[dict]:
 
 
 # ------------------------------------------------------------------ Postolab API
+def _site(host: str) -> str:
+    host = (host or "").lower().split(":")[0]
+    return host[4:] if host.startswith("www.") else host
+
+
+class _KeepAuthSession(requests.Session):
+    """requests buang header Authorization bila dialih ke host lain (cth. postolab.com → www.postolab.com).
+    Kekalkan header jika masih domain yang sama."""
+
+    def rebuild_auth(self, prepared_request, response):
+        from urllib.parse import urlparse
+        old, new = urlparse(response.request.url).hostname, urlparse(prepared_request.url).hostname
+        if _site(old) == _site(new) and "Authorization" in response.request.headers:
+            prepared_request.headers["Authorization"] = response.request.headers["Authorization"]
+            return
+        super().rebuild_auth(prepared_request, response)
+
+
 class Postolab:
     def __init__(self, base: str, key: str, session=None):
-        self.base, self.s = base, session or requests.Session()
+        self.base, self.s = base, session or _KeepAuthSession()
         self.h = {"Authorization": f"Bearer {key}"}
 
     def _check(self, r):
