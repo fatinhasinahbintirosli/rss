@@ -1,0 +1,136 @@
+"""Caption pendek gaya '...see-moo.re' — satu caption berbeza bagi setiap Page.
+
+Gemini menonton video dan tulis ayat pembuka (maks 7 perkataan, tergantung).
+Semua peraturan disemak semula oleh kod di bawah, bukan dipercayai bulat-bulat dari AI.
+"""
+
+from __future__ import annotations
+
+import re
+from difflib import SequenceMatcher
+
+SUFFIX = "...see-moo.re"
+MAX_WORDS = 7
+
+# Perkataan yang tidak dibenarkan dalam caption (tuduhan, kaum/agama, ejekan, kesat)
+BANNED = [
+    # tuduhan jenayah terhadap orang dalam video
+    "curi", "mencuri", "pencuri", "tipu", "penipu", "pukul", "dipukul", "bunuh", "rogol", "samun", "rompak",
+    "dadah", "penagih", "penyangak", "scammer", "scam",
+    # kaum / agama
+    "melayu", "cina", "india", "keling", "indon", "bangla", "negro", "islam", "kristian", "hindu", "buddha",
+    "kafir", "murtad",
+    # ejekan / kesat
+    "padan muka", "padan", "bodoh", "bangang", "sial", "babi", "anjing", "lalat", "sondol", "penyondol",
+    "celaka", "bangsat", "pukimak", "lancau", "puki",
+    # engagement bait
+    "share", "tag", "like", "komen", "comment",
+]
+_BANNED_RE = re.compile(r"\b(" + "|".join(re.escape(w) for w in BANNED) + r")\b", re.I)
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿]")
+_LINK_RE = re.compile(r"https?://|www\.|\.com\b|\.my\b", re.I)
+
+
+def normalize(body: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", body.lower()).strip()
+
+
+def clean_body(raw: str) -> str:
+    """Buang suffix/titik/petikan yang Gemini mungkin tambah sendiri."""
+    s = str(raw or "").strip().strip('"\'“”‘’')
+    s = re.sub(r"\.*\s*see[-\s]?mo+\.?re?\s*$", "", s, flags=re.I)
+    s = re.sub(r"[\s.…,!?;:]+$", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def problems(body: str) -> list[str]:
+    out = []
+    words = body.split()
+    if not words:
+        out.append("kosong")
+    if len(words) > MAX_WORDS:
+        out.append(f"{len(words)} perkataan (maks {MAX_WORDS})")
+    if "#" in body:
+        out.append("ada hashtag")
+    if _EMOJI_RE.search(body):
+        out.append("ada emoji")
+    if _LINK_RE.search(body):
+        out.append("ada pautan")
+    m = _BANNED_RE.search(body)
+    if m:
+        out.append(f"perkataan dilarang: {m.group(1)}")
+    return out
+
+
+def too_similar(body: str, others: list[str], threshold: float = 0.8) -> bool:
+    n = normalize(body)
+    return any(n == normalize(o) or SequenceMatcher(None, n, normalize(o)).ratio() >= threshold for o in others)
+
+
+def finalize(body: str) -> str:
+    return f"{body}{SUFFIX}"
+
+
+def build_prompt(n: int, source_caption: str, avoid: list[str]) -> str:
+    examples = "\n".join(f"- {e}{SUFFIX}" for e in [
+        "Zaman kita dulu, budak ni akan", "Dpt info, dorg ni rupanya", "Katanya staff ni mrh sbb",
+        "Katanya adik ni ada", "Dpt info laki ni dah"])
+    avoid_txt = "\n".join(f"- {a}" for a in avoid[-40:]) or "(tiada)"
+    return f"""Tonton video ini. Tulis {n} ayat pembuka caption Facebook yang BERBEZA antara satu sama lain.
+
+Gaya (contoh, perhatikan semuanya tergantung dan tidak dedahkan pengakhiran):
+{examples}
+
+Syarat setiap ayat:
+- Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).
+- MAKSIMUM {MAX_WORDS} patah perkataan. Ayat mesti tergantung, buat orang nak tahu apa jadi.
+- Berdasarkan apa yang betul-betul berlaku dalam video. Jangan reka fakta.
+- JANGAN tuduh orang dalam video (contoh: jangan guna curi, tipu, pukul, scam).
+- JANGAN sebut bangsa, kaum atau agama. JANGAN ejek orang dalam video.
+- Tiada hashtag, emoji, pautan. Jangan minta like/share/tag/komen.
+- Jangan tulis "see more" atau "...see-moo.re" — ia ditambah kemudian.
+
+Caption asal (untuk konteks sahaja, jangan salin): {source_caption or "(tiada)"}
+
+Jangan ulang atau tiru ayat-ayat ini (sudah digunakan):
+{avoid_txt}
+
+Balas JSON sahaja: {{"captions": ["...", "..."]}}"""
+
+
+def pick_captions(candidates: list[str], n: int, history: list[str]) -> tuple[list[str], list[str]]:
+    """Return (valid bodies up to n, rejected notes)."""
+    chosen: list[str] = []
+    rejected: list[str] = []
+    for raw in candidates:
+        body = clean_body(raw)
+        p = problems(body)
+        if p:
+            rejected.append(f"{body!r}: {', '.join(p)}")
+            continue
+        if too_similar(body, chosen + history):
+            rejected.append(f"{body!r}: terlalu serupa")
+            continue
+        chosen.append(body)
+        if len(chosen) >= n:
+            break
+    return chosen, rejected
+
+
+def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3):
+    """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up."""
+    chosen: list[str] = []
+    rejected_all: list[str] = []
+    for _ in range(rounds):
+        need = n - len(chosen)
+        if need <= 0:
+            break
+        data = ask(build_prompt(need + 2, source_caption, history + chosen))
+        cands = data.get("captions") if isinstance(data, dict) else None
+        if not isinstance(cands, list):
+            rejected_all.append("jawapan Gemini tiada senarai captions")
+            continue
+        got, rej = pick_captions([str(c) for c in cands], need, history + chosen)
+        chosen.extend(got)
+        rejected_all.extend(rej)
+    return [finalize(b) for b in chosen], rejected_all

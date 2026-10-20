@@ -76,3 +76,46 @@ class T(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMultiPage(unittest.TestCase):
+    def test_page_list(self):
+        os.environ["FB_PAGE_URLS"] = "https://www.facebook.com/a/reels/, https://www.facebook.com/b/reels/\nhttps://www.facebook.com/c"
+        try:
+            self.assertEqual(len(m.page_list()), 3)
+        finally:
+            del os.environ["FB_PAGE_URLS"]
+        self.assertIn("buletinmalaysiakuu", " ".join(m.page_list()))
+
+    def test_run_two_pages_offline(self):
+        import tempfile
+        calls = {}
+
+        def fake_list(url, n, proxy="", debug_dir=""):
+            slug = url.split("facebook.com/")[1].split("/")[0]
+            calls[slug] = True
+            base = 100000000 if slug == "a" else 200000000
+            return [f"https://www.facebook.com/reel/{base + i}/" for i in range(3)], []
+
+        def fake_extract(url, proxy="", cookiefile=""):
+            rid = url.rstrip("/").split("/")[-1]
+            return m.Reel(id=rid, url=url, caption=f"cap {rid}", mp4=f"https://v/{rid}.mp4")
+
+        old = (m.list_reel_urls, m.extract_reel, m.time.sleep)
+        m.list_reel_urls, m.extract_reel, m.time.sleep = fake_list, fake_extract, (lambda s: None)
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as td:
+            os.chdir(td)
+            os.environ["FB_PAGE_URLS"] = "facebook.com/a,facebook.com/b"
+            try:
+                self.assertEqual(m.run(), 0)
+                self.assertTrue(os.path.exists("out/a.xml") and os.path.exists("out/b.xml"))
+                root = ET.parse("out/semua.xml").getroot()
+                items = root.findall("channel/item")
+                self.assertEqual(len(items), 6)
+                self.assertEqual({i.findtext("category") for i in items}, {"a", "b"})
+            finally:
+                del os.environ["FB_PAGE_URLS"]
+                os.chdir(cwd)
+                m.list_reel_urls, m.extract_reel, m.time.sleep = old
+        self.assertEqual(set(calls), {"a", "b"})

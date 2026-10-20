@@ -35,10 +35,10 @@ Kalau disekat, ada dua pilihan (isi sebagai secret):
    - **Secrets:** `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`
      (pilihan: `PROXY_URL`, `FB_COOKIES`)
    - **Variables:** `R2_PUBLIC_BASE_URL` (contoh `https://pub-xxxx.r2.dev`),
-     `FB_PAGE_URL` (lalai: penmerahdotcoms), `MAX_REELS` (lalai 10)
+     `FB_PAGE_URLS` (senarai page, dipisah koma; lalai: penmerahdotcoms dan buletinmalaysiakuu), `MAX_REELS` (lalai 10)
 3. Actions → **FB Reels RSS** → **Run workflow**.
 
-Pautan RSS: `R2_PUBLIC_BASE_URL/rss/penmerahdotcoms.xml`
+Pautan RSS: satu bagi setiap page (`rss/penmerahdotcoms.xml`, `rss/buletinmalaysiakuu.xml`) dan satu gabungan semua page (`rss/semua.xml`).
 
 ## Minit GitHub Actions
 Satu larian mengambil kira-kira 3–5 minit (pasang Chromium + tarik 10 reel).
@@ -52,3 +52,30 @@ python -m playwright install chromium
 python fb_reels_rss.py          # tanpa R2: RSS disimpan di out/
 python -m unittest discover -s tests
 ```
+
+## Relay ke Postolab (`postolab_relay.py`)
+
+Berjalan sebagai job kedua (`relay`) selepas RSS dijana, setiap 2 jam:
+1. Baca `rss/semua.xml`, ambil reel yang belum diproses (maks `MAX_VIDEOS_PER_RUN`, lalai 5).
+2. Semak video: teknikal, muzik (hanya jika `AUDD_API_TOKEN` ada), Gemini tonton video (visual + suara + teks).
+3. **Hijau** → Gemini tulis caption berbeza bagi setiap Page (maks 7 perkataan + `...see-moo.re`, disemak oleh kod:
+   tiada tuduhan, kaum/agama, ejekan, hashtag, emoji, pautan, dan tidak serupa caption lama)
+   → upload mp4 ke R2 Postolab → `POST /api/external/videos` (slot :00/:30 seterusnya, profile `deli`).
+   **Kuning** → `YELLOW_MODE` (`skip` lalai, atau `post`). **Merah** → tidak dipost.
+4. Laporan: `R2_PUBLIC_BASE_URL/rss/laporan.html`.
+
+### Tetapan tambahan
+**Secrets:** `POSTOLAB_API_KEY` (kunci `pl_...`, sama seperti siakapkeli), `GEMINI_API_KEY`, pilihan `AUDD_API_TOKEN`.
+
+**Variables:**
+| Nama | Contoh | Maksud |
+|---|---|---|
+| `DRY_RUN` | `1` (lalai) | `1` = jana caption & laporan sahaja, tiada post. Tukar ke `0` bila puas hati. |
+| `SOURCE_PAGE_MAP` | `penmerahdotcoms=111\|222,buletinmalaysiakuu=333` | ID Page dalam Postolab bagi setiap page sumber (video tidak dihantar balik ke page asalnya). |
+| `EXCLUDE_PAGE_IDS` | `444,555` | Page Postolab yang tidak mahu terima video langsung. |
+| `POSTOLAB_PROFILE` | `deli` | Profile dalam Postolab tempat queue dipaparkan. |
+| `YELLOW_MODE` | `skip` | `skip` atau `post`. |
+| `STAGGER` | `0` | `1` = Page ke-2 guna slot kosong ke-2, dst (elak video sama keluar serentak). |
+| `POSTOLAB_URL` | `https://postolab.com` | Alamat Postolab. |
+
+Reel yang dicuba dalam `DRY_RUN=1` masih akan diproses semula bila `DRY_RUN=0`.

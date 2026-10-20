@@ -1,0 +1,335 @@
+"""RSS (semua.xml) → semak video → caption Gemini setiap Page → jadual dalam Postolab.
+
+Larian (GitHub Actions, selepas RSS dijana):
+  1. baca RSS gabungan, cari reel yang belum pernah diproses (state dalam R2)
+  2. muat turun mp4, semak: teknikal, muzik (AudD jika ada token), Gemini (visual + suara + teks)
+  3. HIJAU → Gemini tulis caption berbeza bagi setiap Page → upload mp4 ke R2 Postolab
+            → POST /api/external/videos (slot kosong seterusnya bagi setiap Page, profile "deli")
+     KUNING → ikut YELLOW_MODE (skip | post)      MERAH → skip
+  4. simpan state + laporan HTML ke R2
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import html
+import json
+import os
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+
+import requests
+
+import captions as cap
+from video_checker import layer1_technical
+from video_checker.config import Settings
+from video_checker.gemini import GeminiClient
+from video_checker.models import WARN, Finding
+from video_checker.pipeline import check_video, score
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+
+def env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+# ------------------------------------------------------------------ config
+class Cfg:
+    def __init__(self):
+        self.rss_url = env("RELAY_RSS_URL") or (
+            f"{env('R2_PUBLIC_BASE_URL').rstrip('/')}/{env('R2_PREFIX', 'rss/')}semua.xml")
+        self.postolab_base = env("POSTOLAB_URL", "https://postolab.com").rstrip("/")
+        self.postolab_key = env("POSTOLAB_API_KEY")
+        self.profile = env("POSTOLAB_PROFILE", "deli")
+        self.yellow_mode = env("YELLOW_MODE", "skip").lower()           # skip | post
+        self.max_per_run = int(env("MAX_VIDEOS_PER_RUN", "5"))
+        self.stagger = int(env("STAGGER", "0"))
+        self.dry_run = env("DRY_RUN", "0") in ("1", "true", "ya")
+        # "penmerahdotcoms=1234567890,buletinmalaysiakuu=987654321" → video tidak dihantar ke page asalnya
+        self.source_map = {}
+        for part in env("SOURCE_PAGE_MAP").split(","):
+            if "=" in part:
+                slug, pid = part.split("=", 1)
+                self.source_map[slug.strip().lower()] = {x.strip() for x in pid.split("|") if x.strip()}
+        self.exclude = {x.strip() for x in env("EXCLUDE_PAGE_IDS").split(",") if x.strip()}
+        self.state_key = f"{env('R2_PREFIX', 'rss/')}relay_state.json"
+        self.report_key = f"{env('R2_PREFIX', 'rss/')}laporan.html"
+
+
+# ------------------------------------------------------------------ RSS
+def parse_feed(xml_text: str) -> list[dict]:
+    import re
+    root = ET.fromstring(xml_text)
+    out = []
+    for it in root.iter("item"):
+        link = it.findtext("link") or ""
+        m = re.search(r"/reel/(\d+)", link)
+        enc = it.find("enclosure")
+        if not m or enc is None or not enc.get("url"):
+            continue
+        desc = html.unescape(it.findtext("description") or "")
+        cm = re.search(r"Kapsyen Penuh:</b><br/>(.*?)</p>", desc, re.S)
+        caption = html.unescape(re.sub(r"<[^>]+>", "", (cm.group(1) if cm else "").replace("<br/>", "\n"))).strip()
+        out.append({"id": m.group(1), "url": link, "mp4": html.unescape(enc.get("url")),
+                    "source": (it.findtext("category") or "").strip().lower(), "caption": caption})
+    return out
+
+
+# ------------------------------------------------------------------ Postolab API
+class Postolab:
+    def __init__(self, base: str, key: str, session=None):
+        self.base, self.s = base, session or requests.Session()
+        self.h = {"Authorization": f"Bearer {key}"}
+
+    def _check(self, r):
+        try:
+            j = r.json()
+        except ValueError:
+            raise RuntimeError(f"Postolab {r.status_code}: {r.text[:200]}")
+        if r.status_code >= 400:
+            raise RuntimeError(f"Postolab {r.status_code}: {j.get('error')} {j.get('reason') or ''}".strip())
+        return j
+
+    def pages(self) -> list[dict]:
+        return self._check(self.s.get(f"{self.base}/api/external/videos", headers=self.h, timeout=30))["pages"]
+
+    def upload(self, path: str) -> str:
+        j = self._check(self.s.post(f"{self.base}/api/external/upload-url", headers=self.h,
+                                    json={"fileName": "reel.mp4", "contentType": "video/mp4"}, timeout=30))
+        with open(path, "rb") as f:
+            r = self.s.put(j["uploadUrl"], data=f, headers={"Content-Type": "video/mp4"}, timeout=600)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Upload R2 gagal: {r.status_code} {r.text[:200]}")
+        return j["publicUrl"]
+
+    def schedule(self, video_url: str, source_id: str, posts: list[dict], profile: str, stagger: int) -> dict:
+        return self._check(self.s.post(f"{self.base}/api/external/videos", headers=self.h, timeout=60, json={
+            "videoUrl": video_url, "sourceId": source_id, "posts": posts, "profile": profile, "stagger": stagger}))
+
+
+# ------------------------------------------------------------------ state + report (R2)
+def r2():
+    import boto3
+    return boto3.client("s3", endpoint_url=f"https://{env('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com",
+                        aws_access_key_id=env("R2_ACCESS_KEY_ID"),
+                        aws_secret_access_key=env("R2_SECRET_ACCESS_KEY"), region_name="auto")
+
+
+class Store:
+    def __init__(self, client=None, bucket="", key=""):
+        self.c, self.bucket, self.key = client, bucket, key
+
+    def load(self) -> dict:
+        if not self.c:
+            return {"reels": {}, "captions": []}
+        try:
+            return json.loads(self.c.get_object(Bucket=self.bucket, Key=self.key)["Body"].read())
+        except Exception:
+            return {"reels": {}, "captions": []}
+
+    def save(self, state: dict, report_key: str, report_html: str) -> None:
+        if not self.c:
+            return
+        self.c.put_object(Bucket=self.bucket, Key=self.key, Body=json.dumps(state, ensure_ascii=False).encode(),
+                          ContentType="application/json")
+        self.c.put_object(Bucket=self.bucket, Key=report_key, Body=report_html.encode(),
+                          ContentType="text/html; charset=utf-8", CacheControl="max-age=60")
+
+
+def render_report(state: dict) -> str:
+    dry = {k: {**v, "status": f"percubaan: {v.get('status', '')}"} for k, v in state.get("dry", {}).items()}
+    rows = sorted({**dry, **state["reels"]}.items(), key=lambda kv: kv[1].get("at", ""), reverse=True)[:150]
+    color = {"percubaan: green": "#0891b2", "posted": "#16a34a", "green": "#16a34a", "yellow": "#ca8a04", "red": "#dc2626",
+             "error": "#6b7280", "skipped": "#6b7280"}
+    out = []
+    for rid, r in rows:
+        st = r.get("status", "")
+        caps = "".join(f"<li>{html.escape(c['page'])}: {html.escape(c['message'])} "
+                       f"<small>({html.escape(c.get('when', ''))})</small></li>" for c in r.get("scheduled", []))
+        out.append(
+            f"<tr><td><span style='background:{color.get(st, '#6b7280')};color:#fff;padding:2px 8px;"
+            f"border-radius:99px;font-size:12px'>{html.escape(st)}</span></td>"
+            f"<td><a href='https://www.facebook.com/reel/{rid}/'>{rid}</a><br><small>{html.escape(r.get('source', ''))}"
+            f" · {html.escape(r.get('at', '')[:16].replace('T', ' '))}</small></td>"
+            f"<td>{html.escape(r.get('summary', ''))}"
+            + "".join(f"<div style='color:#555;font-size:13px'>• {html.escape(x)}</div>" for x in r.get("reasons", []))
+            + (f"<ul style='margin:6px 0;padding-left:18px;font-size:13px'>{caps}</ul>" if caps else "")
+            + "</td></tr>")
+    return ("<!doctype html><html lang='ms'><head><meta charset='utf-8'><meta name='viewport' "
+            "content='width=device-width,initial-scale=1'><title>Laporan Relay Reels</title><style>"
+            "body{font-family:system-ui,sans-serif;margin:0;padding:16px;background:#f6f7f9;color:#111}"
+            "table{width:100%;border-collapse:collapse;background:#fff}td{border-top:1px solid #e5e7eb;"
+            "padding:8px;vertical-align:top}a{color:#2563eb}</style></head><body><h1 style='font-size:20px'>"
+            "Laporan Relay Reels</h1><p style='color:#555'>Dikemas kini "
+            f"{html.escape(dt.datetime.now(dt.timezone.utc).isoformat()[:16])} UTC</p><table>"
+            + "".join(out) + "</table></body></html>")
+
+
+# ------------------------------------------------------------------ one reel
+def download(url: str, dest: str, session=None) -> None:
+    s = session or requests
+    with s.get(url, stream=True, timeout=300, headers={"User-Agent": UA}) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
+
+
+def checker_layers(settings: Settings) -> tuple[int, ...]:
+    # Tanpa token AudD, lapisan muzik tidak dijalankan (jika tidak, semua video jadi kuning dalam STRICT_MODE).
+    return (1, 2, 3, 4) if settings.audd_api_token or settings.acrcloud_host else (1, 3, 4)
+
+
+def extra_findings(path: str) -> list[Finding]:
+    """Postolab terbitkan melalui /videos; video SD masih boleh, tapi tandakan kuning."""
+    d = layer1_technical.run(path, "video").data
+    w, h = d.get("width") or 0, d.get("height") or 0
+    if w and h and min(w, h) < 540:
+        return [Finding(1, WARN, "low_resolution", f"Resolusi rendah ({w}x{h}). Kualiti buruk di Facebook.")]
+    return []
+
+
+def gemini_ask_factory(settings: Settings, path: str):
+    """Upload video sekali, kemudian guna fail yang sama untuk semua permintaan caption."""
+    client = GeminiClient(settings.gemini_api_key, settings.gemini_model)
+    f = client.wait_active(client.upload(path))
+
+    def ask(prompt: str) -> dict:
+        return client.generate_json(f, prompt)
+
+    return ask, (lambda: client.delete(f))
+
+
+def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, state: dict, api: Postolab,
+                 checker=check_video, ask_factory=gemini_ask_factory, log=print) -> dict:
+    rec = {"source": item["source"], "at": dt.datetime.now(dt.timezone.utc).isoformat(), "reasons": []}
+    targets = [p for p in pages if str(p["page_id"]) not in cfg.exclude
+               and str(p["page_id"]) not in cfg.source_map.get(item["source"], set())]
+    if not targets:
+        rec.update(status="skipped", summary="Tiada Page sasaran (semua dikecualikan).")
+        return rec
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, f"{item['id']}.mp4")
+        download(item["mp4"], path)
+        report = checker(path, item["caption"], "video", settings, layers=checker_layers(settings))
+        extra = extra_findings(path)
+        if extra:
+            report.layers[0].findings.extend(extra)
+            report.verdict, report.summary = score(report.layers, settings.strict)
+        rec["verdict"], rec["summary"] = report.verdict, report.summary
+        rec["reasons"] = [f"[{f.severity}] {f.message} {f.evidence}".strip()
+                          for f in report.findings if f.severity in ("block", "warn")][:8]
+        go = report.verdict == "green" or (report.verdict == "yellow" and cfg.yellow_mode == "post")
+        if not go:
+            rec["status"] = report.verdict
+            return rec
+
+        ask, cleanup = ask_factory(settings, path)
+        try:
+            history = state.get("captions", [])[-300:]
+            caps, rejected = cap.generate(path, len(targets), item["caption"], history, ask)
+        finally:
+            cleanup()
+        rec["caption_rejected"] = rejected[:10]
+        if not caps:
+            rec.update(status="error", summary="Gemini gagal hasilkan caption yang menepati syarat.")
+            return rec
+        if len(caps) < len(targets):
+            log(f"   nota: hanya {len(caps)} caption sah untuk {len(targets)} Page; Page selebihnya dilangkau.")
+        posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
+
+        if cfg.dry_run:
+            rec.update(status="green", scheduled=[{"page": next(x["page_name"] for x in targets
+                                                               if str(x["page_id"]) == p["pageId"]),
+                                                   "message": p["message"], "when": "(dry run)"} for p in posts])
+            return rec
+        video_url = api.upload(path)
+
+    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger)
+    names = {str(p["page_id"]): p["page_name"] for p in pages}
+    msg = {p["pageId"]: p["message"] for p in posts}
+    rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
+                         "when": c["scheduled_at"]} for c in res.get("created", [])]
+    rec["status"] = "posted" if rec["scheduled"] else "skipped"
+    state.setdefault("captions", []).extend(cap.clean_body(p["message"]) for p in posts)
+    state["captions"] = state["captions"][-500:]
+    return rec
+
+
+# ------------------------------------------------------------------ main
+def run() -> int:
+    cfg, settings = Cfg(), Settings()
+    if not cfg.postolab_key:
+        print("POSTOLAB_API_KEY belum diset.", file=sys.stderr)
+        return 2
+    if not settings.gemini_api_key:
+        print("GEMINI_API_KEY belum diset.", file=sys.stderr)
+        return 2
+    settings.visual_provider = "gemini"
+
+    client = r2() if env("R2_BUCKET") else None
+    store = Store(client, env("R2_BUCKET"), cfg.state_key)
+    state = store.load()
+    api = Postolab(cfg.postolab_base, cfg.postolab_key)
+
+    r = requests.get(cfg.rss_url, timeout=30, headers={"User-Agent": UA})
+    r.raise_for_status()
+    feed = parse_feed(r.text)
+    pages = api.pages()
+    print(f"RSS: {len(feed)} reel | Postolab: {len(pages)} Page | profile '{cfg.profile}'")
+    if cfg.source_map:
+        known = {pid for ids in cfg.source_map.values() for pid in ids}
+        print(f"Page sumber dikecualikan: {', '.join(p['page_name'] for p in pages if str(p['page_id']) in known)}")
+    else:
+        print("AMARAN: SOURCE_PAGE_MAP belum diset — video mungkin dihantar semula ke page asalnya.")
+
+    # Mod percubaan disimpan berasingan: reel yang dicuba masih akan dipost bila DRY_RUN dimatikan.
+    done = state.setdefault("dry", {}) if cfg.dry_run else state["reels"]
+    if cfg.dry_run:
+        print("MOD PERCUBAAN (DRY_RUN=1): caption dijana tetapi TIADA apa-apa dijadualkan ke Postolab.")
+    todo = [it for it in feed if it["id"] not in done][: cfg.max_per_run]
+    for i, item in enumerate(todo, 1):
+        print(f"[{i}/{len(todo)}] {item['id']} ({item['source']})")
+        try:
+            rec = process_reel(item, pages, cfg, settings, state, api)
+        except Exception as e:
+            tries = int(state.setdefault("retry", {}).get(item["id"], 0)) + 1
+            rec = {"source": item["source"], "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                   "status": "error", "summary": str(e)[:300], "tries": tries}
+            if tries < 3:            # cuba lagi larian seterusnya
+                print(f"   ralat (cuba lagi): {e}")
+                state["retry"][item["id"]] = tries
+                store.save(state, cfg.report_key, render_report(state))
+                continue
+        done[item["id"]] = rec
+        print(f"   {rec['status'].upper()}: {rec.get('summary', '')}")
+        for s in rec.get("scheduled", []):
+            print(f"     → {s['page']} @ {s['when']}: {s['message']}")
+        store.save(state, cfg.report_key, render_report(state))
+        time.sleep(2)
+
+    if not todo:
+        print("Tiada reel baru.")
+    store.save(state, cfg.report_key, render_report(state))
+    _summary(todo, state)
+    return 0
+
+
+def _summary(todo, state):
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as f:
+        f.write("## Relay ke Postolab\n\n| Reel | Status | Sebab / caption |\n|---|---|---|\n")
+        for it in todo:
+            r = {**state.get("dry", {}), **state["reels"]}.get(it["id"], {"status": "ralat (akan dicuba lagi)", "summary": ""})
+            detail = "<br>".join(f"{s['page']}: {s['message']}" for s in r.get("scheduled", [])) or r.get("summary", "")
+            f.write(f"| {it['id']} | {r['status']} | {detail.replace('|', '/')} |\n")
+
+
+if __name__ == "__main__":
+    sys.exit(run())
