@@ -26,7 +26,7 @@ import captions as cap
 from video_checker import layer1_technical
 from video_checker.config import Settings
 from video_checker.gemini import GeminiClient
-from video_checker.models import WARN, Finding
+from video_checker.models import BLOCK, INFO, WARN, Finding
 from video_checker.pipeline import check_video, score
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -55,6 +55,16 @@ class Cfg:
                 slug, pid = part.split("=", 1)
                 self.source_map[slug.strip().lower()] = {x.strip() for x in pid.split("|") if x.strip()}
         self.exclude = {x.strip() for x in env("EXCLUDE_PAGE_IDS").split(",") if x.strip()}
+        # Jenis amaran KUNING yang diterima (dianggap hijau). Amaran MERAH tidak boleh dilepaskan.
+        #   low_resolution, visual_violence, visual_weapons, text_profanity, visual_third_party_watermark, ...
+        self.allow_warn = {x.strip() for x in env("ALLOW_WARN").split(",") if x.strip()}
+        # Reel yang awak tonton sendiri dan luluskan walaupun ditanda kuning/merah
+        self.approve_ids = {x.strip() for x in env("APPROVE_IDS").replace("\n", ",").split(",") if x.strip()}
+        # Sentiasa MERAH walaupun Gemini beri tahap "warn": darah, kematian, cedera parah, bunuh diri.
+        self.force_block = {x.strip() for x in env(
+            "FORCE_BLOCK", "visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing").split(",")
+            if x.strip()}
+        self.allow_warn -= self.force_block
         self.state_key = f"{env('R2_PREFIX', 'rss/')}relay_state.json"
         self.report_key = f"{env('R2_PREFIX', 'rss/')}laporan.html"
 
@@ -196,6 +206,11 @@ def download(url: str, dest: str, session=None) -> None:
                 f.write(chunk)
 
 
+# Tidak boleh dilepaskan walaupun melalui APPROVE_IDS
+NEVER_POST = {"visual_nudity_sexual", "visual_minor_safety", "visual_graphic_violence", "visual_self_harm",
+              "visual_drugs", "text_adult_sexual", "text_self_harm", "text_drugs"}
+
+
 def checker_layers(settings: Settings) -> tuple[int, ...]:
     # Tanpa token AudD, lapisan muzik tidak dijalankan (jika tidak, semua video jadi kuning dalam STRICT_MODE).
     return (1, 2, 3, 4) if settings.audd_api_token or settings.acrcloud_host else (1, 3, 4)
@@ -233,13 +248,31 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, f"{item['id']}.mp4")
         download(item["mp4"], path)
-        report = checker(path, item["caption"], "video", settings, layers=checker_layers(settings))
+        # Caption asal TIDAK dipost (diganti caption baru yang disemak berasingan), jadi semak video sahaja.
+        report = checker(path, "", "video", settings, layers=checker_layers(settings))
         extra = extra_findings(path)
         if extra:
             report.layers[0].findings.extend(extra)
-            report.verdict, report.summary = score(report.layers, settings.strict)
+        accepted = []
+        for f in report.findings:
+            if f.code.split(":")[0] in cfg.force_block:
+                f.severity = BLOCK
+            elif f.severity == WARN and f.code.split(":")[0] in cfg.allow_warn:
+                f.severity = INFO
+                accepted.append(f.code.split(":")[0])
+        report.verdict, report.summary = score(report.layers, settings.strict)
+        if accepted:
+            rec["accepted"] = sorted(set(accepted))
+        hard_stop = sorted({f.code.split(":")[0] for f in report.findings
+                            if f.severity == "block" and f.code.split(":")[0] in NEVER_POST})
+        if item["id"] in cfg.approve_ids and report.verdict != "green":
+            if hard_stop:
+                rec["approve_refused"] = hard_stop
+            else:
+                rec["approved_manually"] = True
+                report.verdict, report.summary = "green", "Diluluskan secara manual (APPROVE_IDS)."
         rec["verdict"], rec["summary"] = report.verdict, report.summary
-        rec["reasons"] = [f"[{f.severity}] {f.message} {f.evidence}".strip()
+        rec["reasons"] = [f"[{f.severity}] ({f.code.split(':')[0]}) {f.message} {f.evidence}".strip()
                           for f in report.findings if f.severity in ("block", "warn")][:8]
         go = report.verdict == "green" or (report.verdict == "yellow" and cfg.yellow_mode == "post")
         if not go:
@@ -303,9 +336,12 @@ def run() -> int:
         known = {pid for ids in cfg.source_map.values() for pid in ids}
         print(f"Page sumber dikecualikan: {', '.join(p['page_name'] for p in pages if str(p['page_id']) in known)}")
     else:
-        print("AMARAN: SOURCE_PAGE_MAP belum diset — video mungkin dihantar semula ke page asalnya.")
+        print("SOURCE_PAGE_MAP tidak diset (ok jika page sumber tiada dalam Postolab).")
 
     # Mod percubaan disimpan berasingan: reel yang dicuba masih akan dipost bila DRY_RUN dimatikan.
+    if env("RECHECK", "0") in ("1", "true", "ya"):
+        print("RECHECK=1: keputusan mod percubaan lama dikosongkan.")
+        state["dry"] = {}
     done = state.setdefault("dry", {}) if cfg.dry_run else state["reels"]
     if cfg.dry_run:
         print("MOD PERCUBAAN (DRY_RUN=1): caption dijana tetapi TIADA apa-apa dijadualkan ke Postolab.")
