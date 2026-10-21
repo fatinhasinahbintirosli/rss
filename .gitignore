@@ -1,0 +1,5 @@
+ out/
+   debug/
+   cookies.txt
+   __pycache__/
+   .env
