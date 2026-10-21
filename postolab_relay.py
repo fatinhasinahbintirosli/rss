@@ -365,8 +365,8 @@ def select_todo(feed: list[dict], done: dict, approve_ids: set, recheck: bool, l
 
 # ------------------------------------------------------------------ mod halaman Auto Reels (setiap profile)
 def source_slug(url: str) -> str:
-    m = re.search(r"facebook\.com/([^/?#]+)", url or "")
-    return re.sub(r"[^a-zA-Z0-9_-]", "", m.group(1)).lower() if m else ""
+    from fb_reels_rss import page_slug      # sama dengan <category> dalam RSS
+    return page_slug(url).lower()
 
 
 def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
