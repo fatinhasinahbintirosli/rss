@@ -35,21 +35,36 @@ def normalize(body: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", body.lower()).strip()
 
 
-def clean_body(raw: str) -> str:
-    """Buang suffix/titik/petikan yang Gemini mungkin tambah sendiri."""
+def clean_body(raw: str, suffixes=()) -> str:
+    """Buang suffix/titik/petikan yang Gemini mungkin tambah sendiri (atau ayat penutup profile)."""
     s = str(raw or "").strip().strip('"\'“”‘’')
+    for suf in sorted({x.strip() for x in suffixes if x and x.strip()}, key=len, reverse=True):
+        if s.lower().endswith(suf.lower()):
+            s = s[: -len(suf)].strip()
+            break
     s = re.sub(r"\.*\s*see[-\s]?mo+\.?re?\s*$", "", s, flags=re.I)
     s = re.sub(r"[\s.…,!?;:]+$", "", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
-def problems(body: str) -> list[str]:
+_YANG_RE = re.compile(r"\byang\b", re.I)
+# Kata ganda penuh: rama-rama → rama², baru-baru → baru², orang-orangnya → orang²nya
+_GANDA_RE = re.compile(r"\b([^\W\d_]+)-\1([^\W\d_]*)\b", re.I)
+
+
+def shorten(body: str) -> str:
+    """Gaya singkatan: 'yang' → 'yg', kata ganda → kata² (ikut huruf besar asal)."""
+    body = _YANG_RE.sub(lambda m: "Yg" if m.group(0)[0].isupper() else "yg", body)
+    return _GANDA_RE.sub(lambda m: f"{m.group(1)}²{m.group(2)}", body)
+
+
+def problems(body: str, max_words: int = MAX_WORDS) -> list[str]:
     out = []
     words = body.split()
     if not words:
         out.append("kosong")
-    if len(words) > MAX_WORDS:
-        out.append(f"{len(words)} perkataan (maks {MAX_WORDS})")
+    if len(words) > max_words:
+        out.append(f"{len(words)} perkataan (maks {max_words})")
     if "#" in body:
         out.append("ada hashtag")
     if _EMOJI_RE.search(body):
@@ -67,12 +82,18 @@ def too_similar(body: str, others: list[str], threshold: float = 0.8) -> bool:
     return any(n == normalize(o) or SequenceMatcher(None, n, normalize(o)).ratio() >= threshold for o in others)
 
 
-def finalize(body: str) -> str:
-    return f"{body}{SUFFIX}"
+def finalize(body: str, suffix: str = SUFFIX) -> str:
+    """Ayat penutup yang bermula dengan huruf/nombor dipisahkan satu jarak; yang bermula dengan
+    simbol (cth. "...see-moo.re") dilekatkan terus."""
+    suffix = (suffix or "").strip()
+    if not suffix:
+        return body
+    return f"{body} {suffix}" if suffix[0].isalnum() else f"{body}{suffix}"
 
 
-def build_prompt(n: int, source_caption: str, avoid: list[str]) -> str:
-    examples = "\n".join(f"- {e}{SUFFIX}" for e in [
+def build_prompt(n: int, source_caption: str, avoid: list[str], max_words: int = MAX_WORDS,
+                 suffix: str = SUFFIX, short: bool = False) -> str:
+    examples = "\n".join(f"- {finalize(e, suffix)}" for e in [
         "Zaman kita dulu, budak ni akan", "Dpt info, dorg ni rupanya", "Katanya staff ni mrh sbb",
         "Katanya adik ni ada", "Dpt info laki ni dah"])
     avoid_txt = "\n".join(f"- {a}" for a in avoid[-40:]) or "(tiada)"
@@ -82,13 +103,14 @@ Gaya (contoh, perhatikan semuanya tergantung dan tidak dedahkan pengakhiran):
 {examples}
 
 Syarat setiap ayat:
-- Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).
-- MAKSIMUM {MAX_WORDS} patah perkataan. Ayat mesti tergantung, buat orang nak tahu apa jadi.
+- Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).{"""
+- Tulis "yg" (bukan "yang"). Kata ganda guna ² (rama², baru², kadang²), bukan rama-rama.""" if short else ""}
+- MAKSIMUM {max_words} patah perkataan. Ayat mesti tergantung, buat orang nak tahu apa jadi.
 - Berdasarkan apa yang betul-betul berlaku dalam video. Jangan reka fakta.
 - JANGAN tuduh orang dalam video (contoh: jangan guna curi, tipu, pukul, scam).
 - JANGAN sebut bangsa, kaum atau agama. JANGAN ejek orang dalam video.
 - Tiada hashtag, emoji, pautan. Jangan minta like/share/tag/komen.
-- Jangan tulis "see more" atau "...see-moo.re" — ia ditambah kemudian.
+- Jangan tulis "see more"{f' atau "{suffix.strip()}"' if suffix.strip() else ""} — ayat penutup ditambah kemudian.
 
 Caption asal (untuk konteks sahaja, jangan salin): {source_caption or "(tiada)"}
 
@@ -98,13 +120,16 @@ Jangan ulang atau tiru ayat-ayat ini (sudah digunakan):
 Balas JSON sahaja: {{"captions": ["...", "..."]}}"""
 
 
-def pick_captions(candidates: list[str], n: int, history: list[str]) -> tuple[list[str], list[str]]:
+def pick_captions(candidates: list[str], n: int, history: list[str], max_words: int = MAX_WORDS,
+                  suffix: str = SUFFIX, short: bool = False) -> tuple[list[str], list[str]]:
     """Return (valid bodies up to n, rejected notes)."""
     chosen: list[str] = []
     rejected: list[str] = []
     for raw in candidates:
-        body = clean_body(raw)
-        p = problems(body)
+        body = clean_body(raw, [suffix])
+        if short:
+            body = shorten(body)
+        p = problems(body, max_words)
         if p:
             rejected.append(f"{body!r}: {', '.join(p)}")
             continue
@@ -117,7 +142,8 @@ def pick_captions(candidates: list[str], n: int, history: list[str]) -> tuple[li
     return chosen, rejected
 
 
-def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3):
+def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3,
+             max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False):
     """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up."""
     chosen: list[str] = []
     rejected_all: list[str] = []
@@ -125,12 +151,12 @@ def generate(path_or_file, n: int, source_caption: str, history: list[str], ask,
         need = n - len(chosen)
         if need <= 0:
             break
-        data = ask(build_prompt(need + 2, source_caption, history + chosen))
+        data = ask(build_prompt(need + 2, source_caption, history + chosen, max_words, suffix, short))
         cands = data.get("captions") if isinstance(data, dict) else None
         if not isinstance(cands, list):
             rejected_all.append("jawapan Gemini tiada senarai captions")
             continue
-        got, rej = pick_captions([str(c) for c in cands], need, history + chosen)
+        got, rej = pick_captions([str(c) for c in cands], need, history + chosen, max_words, suffix, short)
         chosen.extend(got)
         rejected_all.extend(rej)
-    return [finalize(b) for b in chosen], rejected_all
+    return [finalize(b, suffix) for b in chosen], rejected_all
