@@ -67,6 +67,9 @@ class Cfg:
             "FORCE_BLOCK", "visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing").split(",")
             if x.strip()}
         self.allow_warn -= self.force_block
+        self.caption_suffix = cap.SUFFIX        # ayat penutup caption (tetapan profile)
+        self.caption_max_words = cap.MAX_WORDS  # maks perkataan sebelum ayat penutup
+        self.caption_short = False              # yang → yg, kata ganda → ²
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
         self.target_ids = None        # set page_id dipilih (None = semua page)
         self.sources = None           # set slug sumber RSS profile (None = semua sumber)
@@ -310,7 +313,9 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
         ask, cleanup = ask_factory(settings, path)
         try:
             history = state.get("captions", [])[-300:]
-            caps, rejected = cap.generate(path, len(targets), item["caption"], history, ask)
+            caps, rejected = cap.generate(path, len(targets), item["caption"], history, ask,
+                                          max_words=cfg.caption_max_words, suffix=cfg.caption_suffix,
+                                          short=cfg.caption_short)
         finally:
             cleanup()
         rec["caption_rejected"] = rejected[:10]
@@ -334,7 +339,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
                          "when": c["scheduled_at"]} for c in res.get("created", [])]
     rec["status"] = "posted" if rec["scheduled"] else "skipped"
-    state.setdefault("captions", []).extend(cap.clean_body(p["message"]) for p in posts)
+    state.setdefault("captions", []).extend(cap.clean_body(p["message"], [cfg.caption_suffix]) for p in posts)
     state["captions"] = state["captions"][-500:]
     return rec
 
@@ -372,6 +377,12 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
     else:                            # ikut menu Time Slots profile di Postolab
         c.stagger, c.slots = 0, {"source": "profile"}
     c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
+    c.caption_short = pc.get("caption_short", True) is not False
+    c.caption_suffix = pc["caption_suffix"] if isinstance(pc.get("caption_suffix"), str) else cap.SUFFIX
+    try:
+        c.caption_max_words = max(3, min(25, int(pc.get("caption_max_words") or cap.MAX_WORDS)))
+    except (TypeError, ValueError):
+        c.caption_max_words = cap.MAX_WORDS
     c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
                     if pc.get("target_mode") == "selected" else None)
     c.sources = {source_slug(u) for u in pc.get("sources") or []} - {""}
@@ -445,7 +456,8 @@ def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed:
         print(f"Profile '{c.profile}': sumber {', '.join(sorted(c.sources)) or '-'} | {tgt}")
     if gl.get("dry_run", True):
         print("MOD PERCUBAAN: caption dijana tetapi TIADA apa-apa dijadualkan ke Postolab.")
-    state = {"captions": [cap.clean_body(x) for x in remote.get("captions") or []]}
+    suffixes = [c.caption_suffix for c in cfgs]
+    state = {"captions": [cap.clean_body(x, suffixes) for x in remote.get("captions") or []]}
     cache, done = {}, []
     jobs = plan_jobs(feed, cfgs, rows, int(gl.get("max_videos_per_run") or base.max_per_run))
     for i, (c, item) in enumerate(jobs, 1):
