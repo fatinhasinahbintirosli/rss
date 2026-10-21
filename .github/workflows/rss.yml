@@ -34,6 +34,10 @@ jobs:
 
       - name: Jana RSS
         env:
+          # Jika halaman Auto Reels di Postolab sudah dipasang, sumber diambil dari situ (setiap profile).
+          # FB_PAGE_URLS hanya dipakai jika Postolab belum ada halaman itu.
+          POSTOLAB_URL: ${{ vars.POSTOLAB_URL || 'https://postolab.com' }}
+          POSTOLAB_API_KEY: ${{ secrets.POSTOLAB_API_KEY }}
           FB_PAGE_URLS: ${{ vars.FB_PAGE_URLS || 'https://www.facebook.com/penmerahdotcoms/reels/,https://www.facebook.com/buletinmalaysiakuu/reels/' }}
           MAX_REELS: ${{ vars.MAX_REELS || '10' }}
           KEEP_ITEMS: ${{ vars.KEEP_ITEMS || '30' }}
@@ -76,6 +80,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Semak video dan jadual ke Postolab
+        # Tetapan (profile, sumber, page, slot, mod percubaan, kandungan dibenarkan) diambil dari
+        # halaman Auto Reels di Postolab. Pembolehubah di bawah POSTOLAB_API_KEY hanya untuk mod lama
+        # (sebelum halaman itu dipasang) dan boleh dibiarkan.
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
