@@ -61,10 +61,28 @@ class RunReport:
 
 
 # ------------------------------------------------------------------ helpers
+def _numeric_page_id(url: str) -> str:
+    """Page baharu Facebook tiada nama pengguna: profile.php?id=615... atau facebook.com/615..."""
+    m = re.search(r"facebook\.com/profile\.php\?(?:[^#]*&)?id=(\d+)", url) or \
+        re.search(r"facebook\.com/(\d{6,})(?:[/?#]|$)", url)
+    return m.group(1) if m else ""
+
+
+def page_slug(url: str) -> str:
+    pid = _numeric_page_id(url or "")
+    if pid:
+        return pid
+    m = re.search(r"facebook\.com/([^/?#]+)", url or "")
+    return re.sub(r"[^a-zA-Z0-9_-]", "", m.group(1)) if m else ""
+
+
 def normalize_reels_url(raw: str) -> tuple[str, str]:
     url = raw.strip().rstrip("/")
     if not url.startswith("http"):
         url = "https://" + url
+    pid = _numeric_page_id(url)
+    if pid:
+        return f"https://www.facebook.com/profile.php?id={pid}&sk=reels_tab", pid
     if "/reels" not in url and "/reel/" not in url:
         url += "/reels/"
     elif url.endswith("/reels"):
@@ -181,9 +199,9 @@ def build_rss(slug: str, page_url: str, reels: list[Reel]) -> str:
         ET.SubElement(it, "link").text = r.url
         ET.SubElement(it, "guid", isPermaLink="true").text = r.url
         ET.SubElement(it, "pubDate").text = r.first_seen
-        src = re.search(r"facebook\.com/([^/]+)/", r.source_page or "")
+        src = page_slug(r.source_page or "")
         if src:
-            ET.SubElement(it, "category").text = src.group(1)
+            ET.SubElement(it, "category").text = src
         d = ""
         if r.thumb:
             d += f'<p><img src="{html.escape(r.thumb)}" style="max-width:400px;"/></p>'
@@ -360,8 +378,12 @@ def run() -> int:
         print(f"\nRSS gabungan ({len(combined)} item): {link}")
 
     _write_report(reports, cfg["debug_dir"])
-    # Red run in GitHub when any page got no mp4 at all, so a block is easy to spot.
-    return 0 if all(r.with_mp4 for r in reports) else 3
+    # Page tanpa reel → amaran sahaja (page lain tetap jalan). Merah hanya jika SEMUA page gagal.
+    for r in reports:
+        if not r.with_mp4:
+            print(f"::warning title=Tiada reel::{r.page_url} - 0 reel dijumpai. Semak pautan page "
+                  "atau pastikan page itu ada tab Reels yang awam.")
+    return 0 if any(r.with_mp4 for r in reports) else 3
 
 
 def _write_report(reports: list[RunReport], debug_dir: str) -> None:
