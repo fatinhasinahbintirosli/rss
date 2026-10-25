@@ -1,0 +1,50 @@
+name: Video Link
+
+# Dicetus serta-merta oleh Postolab bila pautan ditambah (halaman Video Link),
+# dan setiap jam sebagai sandaran untuk pautan yang tertinggal atau gagal (cuba semula maksimum 3 kali).
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "41 * * * *"
+
+concurrency:
+  group: link-videos
+  cancel-in-progress: false
+
+jobs:
+  link:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Pasang ffmpeg dan pakej
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -r requirements.txt
+          pip install -U yt-dlp        # versi terbaru: laman video kerap berubah
+
+      # Pilihan: cookies (format Netscape) untuk video yang perlu log masuk, cth. YouTube yang minta "Sign in".
+      - name: Sediakan cookies (pilihan)
+        env:
+          LINK_COOKIES: ${{ secrets.LINK_COOKIES }}
+        if: env.LINK_COOKIES != ''
+        run: printf '%s' "$LINK_COOKIES" > link_cookies.txt && echo "COOKIES_FILE=link_cookies.txt" >> "$GITHUB_ENV"
+
+      - name: Proses pautan video ke Postolab
+        env:
+          POSTOLAB_URL: ${{ vars.POSTOLAB_URL || 'https://postolab.com' }}
+          POSTOLAB_API_KEY: ${{ secrets.POSTOLAB_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          LINK_MAX_PER_RUN: ${{ vars.LINK_MAX_PER_RUN || '10' }}
+          LINK_MAX_MINUTES: ${{ vars.LINK_MAX_MINUTES || '15' }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          VISUAL_PROVIDER: gemini
+          TRANSCRIBE_PROVIDER: none
+        run: python link_relay.py
