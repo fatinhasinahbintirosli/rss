@@ -133,20 +133,26 @@ class Postolab:
     def pages(self) -> list[dict]:
         return self._check(self.s.get(f"{self.base}/api/external/videos", headers=self.h, timeout=30))["pages"]
 
-    def upload(self, path: str) -> str:
+    def upload(self, path: str, content_type: str = "video/mp4") -> str:
+        name = "reel.mp4" if content_type.startswith("video/") else "image.jpg"
         j = self._check(self.s.post(f"{self.base}/api/external/upload-url", headers=self.h,
-                                    json={"fileName": "reel.mp4", "contentType": "video/mp4"}, timeout=30))
+                                    json={"fileName": name, "contentType": content_type}, timeout=30))
         with open(path, "rb") as f:
-            r = self.s.put(j["uploadUrl"], data=f, headers={"Content-Type": "video/mp4"}, timeout=600)
+            r = self.s.put(j["uploadUrl"], data=f, headers={"Content-Type": content_type}, timeout=600)
         if r.status_code >= 300:
             raise RuntimeError(f"Upload R2 gagal: {r.status_code} {r.text[:200]}")
         return j["publicUrl"]
 
     def schedule(self, video_url: str, source_id: str, posts: list[dict], profile: str, stagger: int,
-                 slots: dict | None = None) -> dict:
+                 slots: dict | None = None, first_comment: str | None = None,
+                 comment_image_url: str | None = None) -> dict:
         body = {"videoUrl": video_url, "sourceId": source_id, "posts": posts, "profile": profile, "stagger": stagger}
         if slots:
             body["slots"] = slots
+        if first_comment:
+            body["firstComment"] = first_comment
+        if comment_image_url:
+            body["commentImageUrl"] = comment_image_url
         return self._check(self.s.post(f"{self.base}/api/external/videos", headers=self.h, timeout=60, json=body))
 
     # Halaman Auto Reels di Postolab: tetapan setiap profile + keputusan semakan.
