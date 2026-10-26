@@ -185,15 +185,26 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
                 "duration": info.get("duration") or 0, "watermark_free": tiktok["free"]}
     except DownloadError:
         raise
-    except Exception as e:  # yt-dlp tidak kenal laman / disekat → cuba cari mp4 dalam halaman
-        first = str(e)
+    except Exception as e:
+        first = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
+        print(f"   yt-dlp: {first[:500]}")
+        # Sandaran (cari mp4 dalam halaman) HANYA untuk laman yang yt-dlp tidak kenal (cth. Threads).
+        # Untuk laman yang disokong (YouTube, TikTok, FB...) tunjukkan ralat sebenar.
+        if "unsupported url" not in first.lower() or is_known_site(url):
+            raise DownloadError(_friendly(first) or first[:300]) from e
         try:
             mp4, title, thumb = _page_video_url(url)
+            path = os.path.join(outdir, "video_page.mp4")
+            download(mp4, path)
+            if not _has_video(path):
+                raise DownloadError("Pautan video dalam halaman bukan fail video.")
         except Exception as e2:
-            raise DownloadError(_friendly(first) or str(e2)) from e
-        path = os.path.join(outdir, "video_page.mp4")
-        download(mp4, path)
+            raise DownloadError(f"Laman tidak disokong atau video tidak awam ({str(e2)[:150]}).") from e
         return {"path": ensure_facebook_mp4(path), "title": title, "description": "", "thumb": thumb, "duration": 0}
+
+
+def is_known_site(url: str) -> bool:
+    return bool(re.search(r"(youtube\.com|youtu\.be|tiktok\.com|facebook\.com|fb\.watch|instagram\.com)", url or "", re.I))
 
 
 def _friendly(msg: str) -> str:
@@ -207,6 +218,8 @@ def _friendly(msg: str) -> str:
                 "atau tambah cookies YouTube dalam secret LINK_COOKIES.")
     if "unsupported url" in m:
         return ""
+    if "po token" in m or "http error 403" in m or "403: forbidden" in m:
+        return "YouTube menyekat muat turun dari pelayan GitHub (403). Tambah cookies YouTube dalam secret LINK_COOKIES."
     if "unavailable" in m or "removed" in m or "not available" in m:
         return "Video tidak lagi tersedia."
     return re.sub(r"\x1b\[[0-9;]*m", "", msg)[:300]
