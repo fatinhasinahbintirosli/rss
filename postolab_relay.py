@@ -147,10 +147,12 @@ class Postolab:
 
     def schedule(self, video_url: str, source_id: str, posts: list[dict], profile: str, stagger: int,
                  slots: dict | None = None, first_comment: str | None = None,
-                 comment_image_url: str | None = None) -> dict:
+                 comment_image_url: str | None = None, when: str | None = None) -> dict:
         body = {"videoUrl": video_url, "sourceId": source_id, "posts": posts, "profile": profile, "stagger": stagger}
         if slots:
             body["slots"] = slots
+        if when:                      # masa tetap (ISO) untuk semua Page; jika tiada → slot kosong seterusnya
+            body["schedule"] = when
         if first_comment:
             body["firstComment"] = first_comment
         if comment_image_url:

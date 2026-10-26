@@ -38,9 +38,10 @@ class FakeApi:
         self.types = getattr(self, "types", []) + [content_type]
         return "https://pub-x.r2.dev/external/" + ("s.jpg" if content_type == "image/jpeg" else "v.mp4")
 
-    def schedule(self, url, sid, posts, profile, stagger, slots=None, first_comment=None, comment_image_url=None):
+    def schedule(self, url, sid, posts, profile, stagger, slots=None, first_comment=None, comment_image_url=None,
+                 when=None):
         self.calls.append(dict(sid=sid, posts=posts, profile=profile, stagger=stagger, slots=slots,
-                               comment=first_comment, comment_img=comment_image_url))
+                               comment=first_comment, comment_img=comment_image_url, when=when))
         if self.skipped:
             return {"created": [], "skipped": self.skipped}
         return {"created": [{"pageId": p["pageId"], "scheduled_at": f"2026-10-26T0{6 + i}:00:00+08:00"}
@@ -201,6 +202,22 @@ class TestLinkRelay(unittest.TestCase):
     def test_screenshot(self):
         shot = lr.screenshot(shutil.copy(MP4, os.path.join(tempfile.mkdtemp(), "v.mp4")))
         self.assertTrue(shot.endswith(".jpg") and os.path.getsize(shot) > 1000)
+
+    def test_when_modes(self):
+        import datetime as dt
+        self.assertIsNone(lr.when_for({"schedule_mode": "queue"}))
+        self.assertIsNone(lr.when_for({}))
+        now = lr.when_for({"schedule_mode": "now"})
+        self.assertLess(abs((dt.datetime.fromisoformat(now) - dt.datetime.now(dt.timezone.utc)).total_seconds()), 5)
+        self.assertEqual(lr.when_for({"schedule_mode": "at", "schedule_at": "2099-01-02T03:04:00+00:00"}),
+                         "2099-01-02T03:04:00+00:00")
+        past = lr.when_for({"schedule_mode": "at", "schedule_at": "2020-01-01T00:00:00Z"})
+        self.assertGreater(dt.datetime.fromisoformat(past).year, 2025)        # masa lepas → segera
+        api = FakeApi()
+        lr.process_link({"id": "w", "profile": "deli", "url": "u", "schedule_mode": "at",
+                         "schedule_at": "2099-01-02T03:04:00+00:00"}, {}, PAGES[:1], self.settings, [], api,
+                        fetcher=fetcher(), ask_factory=asker(["Pakcik ni tenang je bila"]), log=lambda m: None)
+        self.assertEqual(api.calls[0]["when"], "2099-01-02T03:04:00+00:00")
 
     def test_friendly_errors(self):
         self.assertIn("LINK_COOKIES", lr._friendly("ERROR: Sign in to confirm you're not a bot"))

@@ -305,6 +305,18 @@ def targets_for(pc: dict, pages: list[dict]) -> list[dict]:
     return list(pages)
 
 
+def when_for(item: dict) -> str | None:
+    """Bila post: 'now' = segera, 'at' = masa dipilih (semua Page serentak), lain = slot kosong seterusnya."""
+    mode = item.get("schedule_mode") or "queue"
+    if mode == "now":
+        return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    if mode == "at" and item.get("schedule_at"):
+        at = dt.datetime.fromisoformat(str(item["schedule_at"]).replace("Z", "+00:00"))
+        now = dt.datetime.now(dt.timezone.utc)
+        return (at if at > now else now).isoformat(timespec="seconds")   # masa sudah lepas → post segera
+    return None
+
+
 def slots_for(pc: dict) -> tuple[dict | None, int]:
     if pc.get("slot_mode") == "custom":
         return pc.get("slots") or None, int(pc.get("stagger") or 0)
@@ -355,7 +367,7 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
 
     slots, stagger = slots_for(pc)
     res = api.schedule(video_url, f"link:{item['id']}", posts, item["profile"], stagger, slots,
-                       first_comment=comment, comment_image_url=comment_img)
+                       first_comment=comment, comment_image_url=comment_img, when=when_for(item))
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
