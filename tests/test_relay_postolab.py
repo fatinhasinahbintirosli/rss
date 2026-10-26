@@ -62,6 +62,56 @@ class TestCaptions(unittest.TestCase):
         self.assertEqual(out, [])
 
 
+class TestCustomEnding(unittest.TestCase):
+    def test_custom_suffix_and_word_limit(self):
+        suf = "Berita penuh di : tiktok.com"
+        self.assertEqual(cap.finalize("Katanya adik ni ada", suf), "Katanya adik ni ada Berita penuh di : tiktok.com")
+        self.assertEqual(cap.finalize("Katanya adik ni ada", "... baca di komen"), "Katanya adik ni ada... baca di komen")
+        self.assertEqual(cap.finalize("Katanya adik ni ada", ""), "Katanya adik ni ada")
+        self.assertEqual(cap.clean_body("Katanya adik ni ada... Berita penuh di : tiktok.com", [suf]), "Katanya adik ni ada")
+        long = "satu dua tiga empat lima enam tujuh lapan sembilan"
+        out, _ = cap.generate(None, 1, "", [], lambda p: {"captions": [long]}, rounds=1, max_words=10, suffix=suf)
+        self.assertEqual(out, [f"{long} {suf}"])
+        out, rej = cap.generate(None, 1, "", [], lambda p: {"captions": [long]}, rounds=1, max_words=5, suffix=suf)
+        self.assertEqual(out, [])
+        self.assertIn("maks 5", rej[0])
+        prompt = cap.build_prompt(2, "", [], 12, suf)
+        self.assertIn("MAKSIMUM 12", prompt)
+        self.assertIn(suf, prompt)
+
+    def test_shorten(self):
+        sh = cap.shorten
+        self.assertEqual(sh("Yang ni baru-baru je kadang-kadang ada rama-rama"), "Yg ni baru² je kadang² ada rama²")
+        self.assertEqual(sh("Orang-orangnya yang tiba-tiba"), "Orang²nya yg tiba²")
+        self.assertEqual(sh("sayur-mayur dan seyang"), "sayur-mayur dan seyang")      # bukan kata ganda penuh
+        out, _ = cap.generate(None, 1, "", [], lambda p: {"captions": ["Budak yang tiba-tiba"]}, rounds=1, short=True)
+        self.assertEqual(out, ["Budak yg tiba²...see-moo.re"])
+        self.assertIn("yg", cap.build_prompt(1, "", [], short=True))
+
+    def test_profile_cfg_reads_caption_settings(self):
+        c = relay.profile_cfg(relay.Cfg(), "deli", {"dry_run": False},
+                              {"caption_suffix": "Baca di : tiktok.com", "caption_max_words": "12"}, {})
+        self.assertEqual((c.caption_suffix, c.caption_max_words), ("Baca di : tiktok.com", 12))
+        d = relay.profile_cfg(relay.Cfg(), "deli", {}, {}, {})
+        self.assertEqual((d.caption_suffix, d.caption_max_words, d.caption_short), ("...see-moo.re", 7, True))
+        self.assertFalse(relay.profile_cfg(relay.Cfg(), "x", {}, {"caption_short": False}, {}).caption_short)
+
+
+class TestHanging(unittest.TestCase):
+    def test_hanging_preferred_and_retried(self):
+        self.assertTrue(cap.is_hanging("Budak ni tengah kayuh basikal tiba²"))
+        self.assertFalse(cap.is_hanging("Budak ni jatuh dari basikal"))
+        rounds = iter([{"captions": ["Budak ni jatuh dari basikal", "Kucing ni main bola sampai"]},
+                       {"captions": ["Pakcik ni tenang je bila"]}])
+        out, rej = cap.generate(None, 2, "", [], lambda p: next(rounds), rounds=2)
+        self.assertEqual(out, ["Kucing ni main bola sampai...see-moo.re", "Pakcik ni tenang je bila...see-moo.re"])
+        self.assertTrue(any("kurang tergantung" in r for r in rej))
+        # pusingan terakhir: ayat biasa diterima supaya tidak gagal
+        out, _ = cap.generate(None, 1, "", [], lambda p: {"captions": ["Budak ni jatuh dari basikal"]}, rounds=1)
+        self.assertEqual(out, ["Budak ni jatuh dari basikal...see-moo.re"])
+        self.assertIn("TERGANTUNG", cap.build_prompt(1, "", []))
+
+
 class FakePostolab:
     def __init__(self):
         self.uploads, self.calls = 0, []
@@ -70,12 +120,14 @@ class FakePostolab:
         return [{"page_id": "111", "page_name": "Penmerah"}, {"page_id": "222", "page_name": "Page B"},
                 {"page_id": "333", "page_name": "Page C"}]
 
-    def upload(self, path):
+    def upload(self, path, content_type="video/mp4"):
         assert os.path.getsize(path) > 0
         self.uploads += 1
-        return "https://pub-x.r2.dev/external/1.mp4"
+        self.types = getattr(self, "types", []) + [content_type]
+        return "https://pub-x.r2.dev/external/" + ("1.jpg" if content_type == "image/jpeg" else "1.mp4")
 
-    def schedule(self, url, sid, posts, profile, stagger, slots=None):
+    def schedule(self, url, sid, posts, profile, stagger, slots=None, first_comment=None, comment_image_url=None):
+        self.comment = (first_comment, comment_image_url)
         self.calls.append((url, sid, posts, profile, stagger))
         return {"created": [{"pageId": p["pageId"], "id": i, "scheduled_at": f"2026-10-20T{6+i}:00:00+08:00"}
                             for i, p in enumerate(posts)]}
@@ -127,6 +179,22 @@ class TestRelay(unittest.TestCase):
         self.assertEqual(posts[0]["message"], "Dpt info laki ni dah...see-moo.re")
         self.assertNotEqual(posts[0]["message"], posts[1]["message"])
         self.assertEqual(len(state["captions"]), 2)
+
+    def test_first_comment_with_screenshot(self):
+        templates = [{"id": "t1", "text": "Tonton part 2 sini : https://vt.tiktok.com/x/"}]
+        c = relay.profile_cfg(relay.Cfg(), "deli", {"dry_run": False}, {"comment_id": "t1"}, {}, templates)
+        self.assertEqual((c.comment_text, c.comment_image), (templates[0]["text"], True))
+        c.source_map = {"penmerahdotcoms": {"111"}}
+        rec = relay.process_reel(self.item(HD), self.api.pages(), c, self.settings, {"captions": []}, self.api,
+                                 checker=fake_checker(GeminiReview()), log=lambda m: None,
+                                 ask_factory=fake_ask_factory(["Dpt info laki ni dah", "Katanya staff ni mrh sbb"]))
+        self.assertEqual(rec["status"], "posted", rec)
+        self.assertEqual(self.api.comment, (templates[0]["text"], "https://pub-x.r2.dev/external/1.jpg"))
+        self.assertEqual(self.api.types, ["image/jpeg", "video/mp4"])
+        self.assertEqual(relay.to_row(c, {"id": "1", "source": "s"}, rec)["detail"]["comment"], templates[0]["text"])
+        # template dipadam / tiada → tiada komen
+        d = relay.profile_cfg(relay.Cfg(), "deli", {}, {"comment_id": "hilang"}, {}, templates)
+        self.assertIsNone(d.comment_text)
 
     def test_red_not_posted(self):
         rv = GeminiReview(visual=[{"category": "nudity_sexual", "severity": "block", "t": 2.0,
@@ -354,6 +422,9 @@ class TestRemote(unittest.TestCase):
         cfgs = [relay.profile_cfg(self.base, n, st, pc, rowmap) for n, pc in st["profiles"].items() if pc["enabled"]]
         self.assertEqual(cfgs[0].approve_ids, {"9"})
         self.assertEqual(cfgs[0].allow_warn, {"low_resolution"})
+        self.assertEqual((cfgs[0].slots, cfgs[0].stagger), ({"source": "profile"}, 0))   # lalai: Time Slots
+        custom = relay.profile_cfg(self.base, "x", st, {**st["profiles"]["deli"], "slot_mode": "custom"}, {})
+        self.assertEqual((custom.slots["step"], custom.stagger), (30, 1))
         jobs = relay.plan_jobs(feed, cfgs, rowmap, 1)
         self.assertEqual([(c.profile, it["id"]) for c, it in jobs], [("deli", "9"), ("kedua", "9")][:len(jobs)])
         self.assertTrue(all(it["id"] == "9" for _, it in jobs))

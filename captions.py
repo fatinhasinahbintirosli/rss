@@ -102,10 +102,18 @@ def build_prompt(n: int, source_caption: str, avoid: list[str], max_words: int =
 Gaya (contoh, perhatikan semuanya tergantung dan tidak dedahkan pengakhiran):
 {examples}
 
+PALING PENTING — ayat mesti TERGANTUNG:
+- Berhenti TEPAT sebelum bahagian paling menarik / jawapan. Pembaca mesti tertanya "lepas tu apa jadi?".
+- Akhiri dengan perkataan penyambung yang membuatkan ayat tidak lengkap, contohnya:
+  bila, sbb, rupanya, terus, tiba², lepas, sampai, akan, nak, dah, ada, yg, masa, tapi, mcm, kena.
+- JANGAN habiskan cerita, JANGAN beri kesimpulan, JANGAN dedahkan apa yang berlaku di hujung video.
+- Contoh SALAH (sudah lengkap, tiada rasa ingin tahu): "Budak ni jatuh dari basikal", "Kucing comel main bola".
+- Contoh BETUL (tergantung): "Budak ni tengah kayuh basikal tiba²", "Kucing ni main bola sampai dia".
+
 Syarat setiap ayat:
 - Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).{"""
 - Tulis "yg" (bukan "yang"). Kata ganda guna ² (rama², baru², kadang²), bukan rama-rama.""" if short else ""}
-- MAKSIMUM {max_words} patah perkataan. Ayat mesti tergantung, buat orang nak tahu apa jadi.
+- MAKSIMUM {max_words} patah perkataan.
 - Berdasarkan apa yang betul-betul berlaku dalam video. Jangan reka fakta.
 - JANGAN tuduh orang dalam video (contoh: jangan guna curi, tipu, pukul, scam).
 - JANGAN sebut bangsa, kaum atau agama. JANGAN ejek orang dalam video.
@@ -120,16 +128,37 @@ Jangan ulang atau tiru ayat-ayat ini (sudah digunakan):
 Balas JSON sahaja: {{"captions": ["...", "..."]}}"""
 
 
+# Perkataan penyambung yang membuatkan ayat "tergantung" bila diletak di hujung
+HANGING = {
+    "bila", "sbb", "sebab", "rupanya", "rupa", "terus", "tiba²", "tiba-tiba", "lepas", "selepas", "sebelum",
+    "sampai", "akan", "nak", "nk", "dah", "sudah", "ada", "yg", "yang", "masa", "waktu", "time", "tapi", "tp",
+    "mcm", "macam", "kena", "dia", "dorg", "dia", "ni", "tu", "untuk", "utk", "dengan", "dgn", "kat", "dekat",
+    "pada", "dalam", "dlm", "jadi", "buat", "bagi", "kata", "cakap", "nampak", "tengok", "dengar", "ingatkan",
+    "ingat", "sangka", "tak", "x", "pun", "je", "mula", "baru", "kalau", "klu", "boleh", "punya", "apa",
+    "siapa", "mana", "drpd", "dari", "ke", "cuba", "terus²", "bawa", "minta", "suruh", "jumpa", "dapat", "dpt",
+}
+
+
+def is_hanging(body: str) -> bool:
+    words = re.findall(r"[\w²-]+", body.lower())
+    return bool(words) and words[-1] in HANGING
+
+
 def pick_captions(candidates: list[str], n: int, history: list[str], max_words: int = MAX_WORDS,
-                  suffix: str = SUFFIX, short: bool = False) -> tuple[list[str], list[str]]:
-    """Return (valid bodies up to n, rejected notes)."""
+                  suffix: str = SUFFIX, short: bool = False, allow_flat: bool = True) -> tuple[list[str], list[str]]:
+    """Return (valid bodies up to n, rejected notes). allow_flat=False tolak ayat yang tidak tergantung."""
     chosen: list[str] = []
     rejected: list[str] = []
-    for raw in candidates:
-        body = clean_body(raw, [suffix])
-        if short:
-            body = shorten(body)
+    # Utamakan ayat yang berakhir dengan perkataan tergantung; ayat "lengkap" hanya jika tidak cukup.
+    def prep(raw):
+        b = clean_body(raw, [suffix])
+        return shorten(b) if short else b
+    bodies = [prep(c) for c in candidates]
+    ordered = [b for b in bodies if is_hanging(b)] + [b for b in bodies if not is_hanging(b)]
+    for body in ordered:
         p = problems(body, max_words)
+        if not p and not allow_flat and not is_hanging(body):
+            p = ["kurang tergantung"]
         if p:
             rejected.append(f"{body!r}: {', '.join(p)}")
             continue
@@ -147,16 +176,18 @@ def generate(path_or_file, n: int, source_caption: str, history: list[str], ask,
     """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up."""
     chosen: list[str] = []
     rejected_all: list[str] = []
-    for _ in range(rounds):
+    for rnd in range(rounds):
         need = n - len(chosen)
         if need <= 0:
             break
-        data = ask(build_prompt(need + 2, source_caption, history + chosen, max_words, suffix, short))
+        data = ask(build_prompt(need + 3, source_caption, history + chosen, max_words, suffix, short))
         cands = data.get("captions") if isinstance(data, dict) else None
         if not isinstance(cands, list):
             rejected_all.append("jawapan Gemini tiada senarai captions")
             continue
-        got, rej = pick_captions([str(c) for c in cands], need, history + chosen, max_words, suffix, short)
+        # Pusingan awal: hanya ayat tergantung. Pusingan terakhir: terima ayat biasa supaya tidak gagal.
+        got, rej = pick_captions([str(c) for c in cands], need, history + chosen, max_words, suffix, short,
+                                 allow_flat=(rnd == rounds - 1))
         chosen.extend(got)
         rejected_all.extend(rej)
     return [finalize(b, suffix) for b in chosen], rejected_all

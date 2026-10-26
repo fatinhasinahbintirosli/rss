@@ -80,7 +80,8 @@ class TestLinkRelay(unittest.TestCase):
         c = api.calls[0]
         self.assertEqual((c["sid"], c["profile"], c["slots"], c["stagger"]), ("link:abc", "deli", {"source": "profile"}, 0))
         self.assertEqual([p["pageId"] for p in c["posts"]], ["1", "3"])
-        self.assertEqual(c["posts"][0]["message"], "Budak yg tiba² lari Baca di : tiktok.com")
+        self.assertEqual(sorted(p["message"] for p in c["posts"]),
+                         ["Budak yg tiba² lari Baca di : tiktok.com", "Ramai orang terkejut bila Baca di : tiktok.com"])
         self.assertEqual(rec["thumb_url"], "https://t/1.jpg")
         self.assertEqual(len(hist), 2)
 

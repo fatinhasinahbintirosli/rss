@@ -70,6 +70,8 @@ class Cfg:
         self.caption_suffix = cap.SUFFIX        # ayat penutup caption (tetapan profile)
         self.caption_max_words = cap.MAX_WORDS  # maks perkataan sebelum ayat penutup
         self.caption_short = False              # yang → yg, kata ganda → ²
+        self.comment_text = None                # komen pertama (teks template), None = tiada
+        self.comment_image = True               # sertakan screenshot video dalam komen pertama
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
         self.target_ids = None        # set page_id dipilih (None = semua page)
         self.sources = None           # set slug sumber RSS profile (None = semua sumber)
@@ -331,6 +333,13 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
         if len(caps) < len(targets):
             log(f"   nota: hanya {len(caps)} caption sah untuk {len(targets)} Page; Page selebihnya dilangkau.")
         posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
+        comment_img = None
+        if cfg.comment_text:
+            rec["comment"] = cfg.comment_text
+            rec["comment_image"] = bool(cfg.comment_image)
+            if cfg.comment_image and not cfg.dry_run:
+                from link_relay import screenshot          # import lewat: elak import bulat
+                comment_img = api.upload(screenshot(path), "image/jpeg")
 
         if cfg.dry_run:
             rec.update(status="green", scheduled=[{"page": next(x["page_name"] for x in targets
@@ -339,7 +348,8 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             return rec
         video_url = api.upload(path)
 
-    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger, cfg.slots)
+    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger, cfg.slots,
+                       first_comment=cfg.comment_text, comment_image_url=comment_img)
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
@@ -375,7 +385,7 @@ def source_slug(url: str) -> str:
     return page_slug(url).lower()
 
 
-def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
+def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates: list | None = None) -> Cfg:
     c = copy.copy(base)
     c.profile, c.dry_run, c.yellow_mode = name, bool(gl.get("dry_run", True)), "skip"
     if pc.get("slot_mode") == "custom":
@@ -384,6 +394,9 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict) -> Cfg:
         c.stagger, c.slots = 0, {"source": "profile"}
     c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
     c.caption_short = pc.get("caption_short", True) is not False
+    tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
+    c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
+    c.comment_image = pc.get("comment_image", True) is not False
     c.caption_suffix = pc["caption_suffix"] if isinstance(pc.get("caption_suffix"), str) else cap.SUFFIX
     try:
         c.caption_max_words = max(3, min(25, int(pc.get("caption_max_words") or cap.MAX_WORDS)))
@@ -439,8 +452,8 @@ def to_row(c: Cfg, item: dict, rec: dict, tries: int = 0) -> dict:
         "profile": c.profile, "reel_id": item["id"], "status": rec["status"], "source": item["source"],
         "reel_url": item.get("url"), "thumb_url": item.get("thumb"), "verdict": rec.get("verdict"),
         "summary": rec.get("summary", ""), "reasons": rec.get("reasons", []), "scheduled": rec.get("scheduled", []),
-        "detail": {k: rec[k] for k in ("accepted", "approved_manually", "approve_refused", "caption_rejected")
-                   if rec.get(k)},
+        "detail": {k: rec[k] for k in ("accepted", "approved_manually", "approve_refused", "caption_rejected",
+                                       "comment", "comment_image") if rec.get(k)},
         "dry_run": c.dry_run, "tries": tries,
     }
 
@@ -452,7 +465,8 @@ def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed:
         print("Auto Reels DIHENTIKAN SEMENTARA (halaman Auto Reels → Tetapan).")
         return []
     rows = {(r["profile"], r["reel_id"]): r for r in remote.get("items") or []}
-    cfgs = [profile_cfg(base, name, gl, pc, rows) for name, pc in (gl.get("profiles") or {}).items()
+    templates = remote.get("comment_templates") or []
+    cfgs = [profile_cfg(base, name, gl, pc, rows, templates) for name, pc in (gl.get("profiles") or {}).items()
             if pc.get("enabled")]
     if not cfgs:
         print("Tiada profile diaktifkan di halaman Auto Reels.")
