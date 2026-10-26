@@ -59,6 +59,11 @@ def _probe(path: str) -> dict:
         return {}
 
 
+def _has_video(path: str) -> bool:
+    return any(s.get("codec_type") == "video" and s.get("codec_name") not in ("mjpeg", "png")
+               for s in _probe(path).get("streams") or [])
+
+
 def ensure_facebook_mp4(path: str) -> str:
     """Facebook terima mp4 H.264 + AAC dengan paling baik. Tukar jika video lain (cth. VP9/webm dari YouTube)."""
     info = _probe(path)
@@ -144,7 +149,9 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         "quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30,
         "outtmpl": os.path.join(outdir, "video.%(ext)s"),
         # Terbaik ≤1080p; utamakan mp4 (H.264) supaya tidak perlu tukar format
-        "format": "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4]/bv*[height<=1080]+ba/b[height<=1080]/b",
+        # [vcodec!=none] elak "format" gambar/storyboard atau audio sahaja
+        "format": ("bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4][vcodec!=none]"
+                   "/bv*[height<=1080][vcodec!=none]+ba/b[height<=1080][vcodec!=none]/bv*[vcodec!=none]+ba/b[vcodec!=none]"),
         "merge_output_format": "mp4",
         "http_headers": {"User-Agent": UA},
     }
@@ -166,9 +173,12 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             if dur and dur > max_minutes * 60:
                 raise DownloadError(f"Video terlalu panjang ({round(dur / 60)} minit, had {max_minutes} minit).")
             ydl.process_info(info)          # muat turun format yang sudah dipilih
-        files = [f for f in glob.glob(os.path.join(outdir, "video.*")) if not f.endswith((".part", ".ytdl"))]
+        files = [f for f in glob.glob(os.path.join(outdir, "video.*"))
+                 if f.lower().endswith((".mp4", ".mkv", ".webm", ".mov", ".m4v", ".flv", ".ts"))]
+        files = [f for f in files if _has_video(f)]
         if not files:
-            raise DownloadError("Video gagal dimuat turun.")
+            raise DownloadError("Laman ini hanya beri audio atau gambar, tiada fail video. Jika YouTube, "
+                                "pastikan workflow link.yml terbaru (Deno) dipasang, atau tambah cookies LINK_COOKIES.")
         path = max(files, key=os.path.getsize)
         return {"path": ensure_facebook_mp4(path), "title": info.get("title") or "",
                 "description": info.get("description") or "", "thumb": info.get("thumbnail") or "",
@@ -192,6 +202,9 @@ def _friendly(msg: str) -> str:
         return "YouTube minta log masuk (sekatan bot). Tambah cookies YouTube dalam secret LINK_COOKIES."
     if "private" in m or "login" in m or "log in" in m:
         return "Video ini peribadi atau perlu log masuk."
+    if "requested format is not available" in m or "only images are available" in m:
+        return ("YouTube tidak beri format video. Pastikan workflow link.yml terbaru (dengan Deno) dipasang, "
+                "atau tambah cookies YouTube dalam secret LINK_COOKIES.")
     if "unsupported url" in m:
         return ""
     if "unavailable" in m or "removed" in m or "not available" in m:
