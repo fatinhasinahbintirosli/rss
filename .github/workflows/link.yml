@@ -23,11 +23,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # YouTube perlukan enjin JavaScript (Deno) + yt-dlp-ejs; tanpanya format video YouTube tidak lengkap.
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
       - name: Pasang ffmpeg dan pakej
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install -r requirements.txt
-          pip install -U yt-dlp        # versi terbaru: laman video kerap berubah
+          pip install -U "yt-dlp[default]"   # versi terbaru + yt-dlp-ejs (laman video kerap berubah)
+          deno --version && yt-dlp --version
 
       # Pilihan: cookies (format Netscape) untuk video yang perlu log masuk, cth. YouTube yang minta "Sign in".
       - name: Sediakan cookies (pilihan)
