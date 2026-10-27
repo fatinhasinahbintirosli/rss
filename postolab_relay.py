@@ -69,6 +69,7 @@ class Cfg:
         self.allow_warn -= self.force_block
         self.caption_suffix = cap.SUFFIX        # ayat penutup caption (tetapan profile)
         self.caption_max_words = cap.MAX_WORDS  # maks perkataan sebelum ayat penutup
+        self.caption_min_words = 1              # min perkataan (julat "dari X hingga Y")
         self.caption_short = False              # yang → yg, kata ganda → ²
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
@@ -324,7 +325,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
         try:
             history = state.get("captions", [])[-300:]
             caps, rejected = cap.generate(path, len(targets), item["caption"], history, ask,
-                                          max_words=cfg.caption_max_words, suffix=cfg.caption_suffix,
+                                          max_words=cfg.caption_max_words, min_words=cfg.caption_min_words, suffix=cfg.caption_suffix,
                                           short=cfg.caption_short)
         finally:
             cleanup()
@@ -405,6 +406,10 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
         c.caption_max_words = max(3, min(25, int(pc.get("caption_max_words") or cap.MAX_WORDS)))
     except (TypeError, ValueError):
         c.caption_max_words = cap.MAX_WORDS
+    try:
+        c.caption_min_words = max(1, min(c.caption_max_words, int(pc.get("caption_min_words") or 1)))
+    except (TypeError, ValueError):
+        c.caption_min_words = 1
     c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
                     if pc.get("target_mode") == "selected" else None)
     c.sources = {source_slug(u) for u in pc.get("sources") or []} - {""}

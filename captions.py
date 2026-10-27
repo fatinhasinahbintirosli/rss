@@ -58,13 +58,15 @@ def shorten(body: str) -> str:
     return _GANDA_RE.sub(lambda m: f"{m.group(1)}²{m.group(2)}", body)
 
 
-def problems(body: str, max_words: int = MAX_WORDS) -> list[str]:
+def problems(body: str, max_words: int = MAX_WORDS, min_words: int = 1) -> list[str]:
     out = []
     words = body.split()
     if not words:
         out.append("kosong")
     if len(words) > max_words:
         out.append(f"{len(words)} perkataan (maks {max_words})")
+    elif words and len(words) < min_words:
+        out.append(f"{len(words)} perkataan (min {min_words})")
     if "#" in body:
         out.append("ada hashtag")
     if _EMOJI_RE.search(body):
@@ -92,7 +94,9 @@ def finalize(body: str, suffix: str = SUFFIX) -> str:
 
 
 def build_prompt(n: int, source_caption: str, avoid: list[str], max_words: int = MAX_WORDS,
-                 suffix: str = SUFFIX, short: bool = False) -> str:
+                 suffix: str = SUFFIX, short: bool = False, min_words: int = 1) -> str:
+    words_rule = (f"ANTARA {min_words} HINGGA {max_words} patah perkataan (cuba pelbagaikan panjang ayat)"
+                  if 1 < min_words < max_words else f"MAKSIMUM {max_words} patah perkataan")
     examples = "\n".join(f"- {finalize(e, suffix)}" for e in [
         "Zaman kita dulu, budak ni akan", "Dpt info, dorg ni rupanya", "Katanya staff ni mrh sbb",
         "Katanya adik ni ada", "Dpt info laki ni dah"])
@@ -110,10 +114,19 @@ PALING PENTING — ayat mesti TERGANTUNG:
 - Contoh SALAH (sudah lengkap, tiada rasa ingin tahu): "Budak ni jatuh dari basikal", "Kucing comel main bola".
 - Contoh BETUL (tergantung): "Budak ni tengah kayuh basikal tiba²", "Kucing ni main bola sampai dia".
 
+JANGAN jadikan perkara yang SUDAH JELAS dalam video sebagai "rahsia":
+- Apa yang penonton boleh nampak sendiri (cth. ada jenazah, orang menangis, kemalangan) — sebut TERUS, jangan gantung.
+- Gantung pada perkara yang BELUM diketahui penonton: sebab, cerita di sebalik, apa berlaku sebelum/selepas, siapa dia.
+- Contoh: video adik mencari ibunya di sisi jenazah ibu.
+  SALAH: "Adik ni cari mummy dia rupanya dah" (semua orang sudah nampak ibunya meninggal).
+  BETUL: "Yg kesiannya, mak dia meninggal sbb" / "Sebelum pergi, mak dia sempat pesan".
+- Tetapi gantung HANYA pada perkara yang ada jawapannya dalam video atau caption asal. Jangan reka misteri
+  atau janji maklumat yang tiada (cth. jangan tulis "meninggal sbb" jika sebabnya tidak disebut langsung).
+
 Syarat setiap ayat:
 - Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).{"""
 - Tulis "yg" (bukan "yang"). Kata ganda guna ² (rama², baru², kadang²), bukan rama-rama.""" if short else ""}
-- MAKSIMUM {max_words} patah perkataan.
+- {words_rule}.
 - Berdasarkan apa yang betul-betul berlaku dalam video. Jangan reka fakta.
 - JANGAN tuduh orang dalam video (contoh: jangan guna curi, tipu, pukul, scam).
 - JANGAN sebut bangsa, kaum atau agama. JANGAN ejek orang dalam video.
@@ -145,7 +158,8 @@ def is_hanging(body: str) -> bool:
 
 
 def pick_captions(candidates: list[str], n: int, history: list[str], max_words: int = MAX_WORDS,
-                  suffix: str = SUFFIX, short: bool = False, allow_flat: bool = True) -> tuple[list[str], list[str]]:
+                  suffix: str = SUFFIX, short: bool = False, allow_flat: bool = True,
+                  min_words: int = 1) -> tuple[list[str], list[str]]:
     """Return (valid bodies up to n, rejected notes). allow_flat=False tolak ayat yang tidak tergantung."""
     chosen: list[str] = []
     rejected: list[str] = []
@@ -156,7 +170,7 @@ def pick_captions(candidates: list[str], n: int, history: list[str], max_words: 
     bodies = [prep(c) for c in candidates]
     ordered = [b for b in bodies if is_hanging(b)] + [b for b in bodies if not is_hanging(b)]
     for body in ordered:
-        p = problems(body, max_words)
+        p = problems(body, max_words, min_words)
         if not p and not allow_flat and not is_hanging(body):
             p = ["kurang tergantung"]
         if p:
@@ -182,7 +196,7 @@ def fill_to(captions: list[str], n: int) -> list[str]:
 
 
 def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3,
-             max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False):
+             max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False, min_words: int = 1):
     """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up.
     Untuk banyak Page (cth. 100), caption diminta berperingkat (CHUNK setiap permintaan)."""
     chosen: list[str] = []
@@ -192,14 +206,15 @@ def generate(path_or_file, n: int, source_caption: str, history: list[str], ask,
         need = n - len(chosen)
         if need <= 0:
             break
-        data = ask(build_prompt(min(need, CHUNK) + 3, source_caption, history + chosen, max_words, suffix, short))
+        data = ask(build_prompt(min(need, CHUNK) + 3, source_caption, history + chosen, max_words, suffix, short,
+                                min_words))
         cands = data.get("captions") if isinstance(data, dict) else None
         if not isinstance(cands, list):
             rejected_all.append("jawapan Gemini tiada senarai captions")
             continue
         # Pusingan awal: hanya ayat tergantung. Pusingan terakhir: terima ayat biasa supaya tidak gagal.
         got, rej = pick_captions([str(c) for c in cands], min(need, CHUNK + 3), history + chosen, max_words, suffix, short,
-                                 allow_flat=(rnd == rounds - 1))
+                                 allow_flat=(rnd == rounds - 1), min_words=min_words)
         chosen.extend(got)
         rejected_all.extend(rej)
     return [finalize(b, suffix) for b in chosen], rejected_all

@@ -112,6 +112,20 @@ class TestHanging(unittest.TestCase):
         self.assertIn("TERGANTUNG", cap.build_prompt(1, "", []))
 
 
+class TestWordRangeAndObvious(unittest.TestCase):
+    def test_min_words_and_prompt(self):
+        self.assertTrue(cap.problems("Adik ni tiba²", 7, 4))
+        self.assertEqual(cap.problems("Yg kesiannya mak dia meninggal sbb", 7, 4), [])
+        p = cap.build_prompt(3, "", [], 7, min_words=4)
+        self.assertIn("ANTARA 4 HINGGA 7", p)
+        self.assertIn("SUDAH JELAS", p)
+        out, rej = cap.generate(None, 1, "", [], lambda q: {"captions": ["Adik ni tiba²", "Yg kesiannya mak dia meninggal sbb"]},
+                                rounds=1, max_words=7, min_words=4)
+        self.assertEqual(out, ["Yg kesiannya mak dia meninggal sbb...see-moo.re"])
+        c = relay.profile_cfg(relay.Cfg(), "deli", {}, {"caption_min_words": 9, "caption_max_words": 7}, {})
+        self.assertEqual((c.caption_min_words, c.caption_max_words), (7, 7))
+
+
 class TestManyPages(unittest.TestCase):
     def test_100_pages_chunked_and_filled(self):
         import itertools

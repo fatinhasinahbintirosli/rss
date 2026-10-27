@@ -453,6 +453,7 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         return rec
     suffix = pc["caption_suffix"] if isinstance(pc.get("caption_suffix"), str) else cap.SUFFIX
     max_words = max(3, min(25, int(pc.get("caption_max_words") or cap.MAX_WORDS)))
+    min_words = max(1, min(max_words, int(pc.get("caption_min_words") or 1)))
     short = pc.get("caption_short", True) is not False
 
     with tempfile.TemporaryDirectory() as td:
@@ -469,7 +470,7 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         ask, cleanup = ask_factory(settings, v["path"])
         try:
             caps, rejected = cap.generate(v["path"], len(targets), context, history, ask,
-                                          max_words=max_words, suffix=suffix, short=short)
+                                          max_words=max_words, min_words=min_words, suffix=suffix, short=short)
         finally:
             cleanup()
         if rejected:
