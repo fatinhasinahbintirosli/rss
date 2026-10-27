@@ -117,8 +117,11 @@ def ensure_chromium() -> None:
     global _PW_READY
     if _PW_READY:
         return
-    subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
-                   check=True, timeout=900, capture_output=True)
+    # Tanpa --with-deps dahulu (pelayan GitHub sudah ada pustaka sistem; apt-get kadang-kadang tergantung)
+    r = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], timeout=600, capture_output=True)
+    if r.returncode != 0:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                       check=True, timeout=600, capture_output=True)
     _PW_READY = True
 
 
