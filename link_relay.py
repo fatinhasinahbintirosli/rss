@@ -325,16 +325,26 @@ def targets_for(pc: dict, pages: list[dict]) -> list[dict]:
     return list(pages)
 
 
-def when_for(item: dict) -> str | None:
-    """Bila post: 'now' = segera, 'at' = masa dipilih (semua Page serentak), lain = slot kosong seterusnya."""
+def times_for(item: dict) -> list[str | None]:
+    """Bila post: 'now' = [segera], 'at' = setiap masa dipilih (semua Page serentak pada setiap masa),
+    lain = [None] (slot kosong seterusnya). Masa yang sudah lepas → post segera."""
     mode = item.get("schedule_mode") or "queue"
+    now = dt.datetime.now(dt.timezone.utc)
     if mode == "now":
-        return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    if mode == "at" and item.get("schedule_at"):
-        at = dt.datetime.fromisoformat(str(item["schedule_at"]).replace("Z", "+00:00"))
-        now = dt.datetime.now(dt.timezone.utc)
-        return (at if at > now else now).isoformat(timespec="seconds")   # masa sudah lepas → post segera
-    return None
+        return [now.isoformat(timespec="seconds")]
+    if mode == "at":
+        raw = item.get("schedule_times") or ([item["schedule_at"]] if item.get("schedule_at") else [])
+        out = []
+        for v in raw:
+            at = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            out.append((at if at > now else now).isoformat(timespec="seconds"))
+        if out:
+            return out
+    return [None]
+
+
+def when_for(item: dict) -> str | None:
+    return times_for(item)[0]
 
 
 def slots_for(pc: dict) -> tuple[dict | None, int]:
@@ -386,10 +396,18 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         video_url = api.upload(v["path"])
 
     slots, stagger = slots_for(pc)
-    res = api.schedule(video_url, f"link:{item['id']}", posts, item["profile"], stagger, slots,
-                       first_comment=comment, comment_image_url=comment_img, when=when_for(item))
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
+    created, skipped = [], []
+    times = times_for(item)
+    for i, when in enumerate(times):
+        # Setiap masa ada sourceId sendiri supaya semakan "sudah dijadualkan" tidak menghalang masa kedua dst.
+        sid = f"link:{item['id']}" if i == 0 else f"link:{item['id']}@{i}"
+        res = api.schedule(video_url, sid, posts, item["profile"], stagger, slots,
+                           first_comment=comment, comment_image_url=comment_img, when=when)
+        created += res.get("created", [])
+        skipped += res.get("skipped", [])
+    res = {"created": created, "skipped": skipped}
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
                          "when": c["scheduled_at"]} for c in res.get("created", [])]
     already = [s for s in res.get("skipped", []) if s.get("reason") == "sudah_dijadualkan"]
