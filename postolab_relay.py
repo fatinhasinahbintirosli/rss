@@ -467,9 +467,11 @@ def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed:
         print("Auto Reels DIHENTIKAN SEMENTARA (halaman Auto Reels → Tetapan).")
         return []
     rows = {(r["profile"], r["reel_id"]): r for r in remote.get("items") or []}
-    templates = remote.get("comment_templates") or []
-    cfgs = [profile_cfg(base, name, gl, pc, rows, templates) for name, pc in (gl.get("profiles") or {}).items()
-            if pc.get("enabled")]
+    # Template komen pertama ikut profile; "comment_templates" (senarai lama, dikongsi) hanya sebagai sandaran
+    by_profile = remote.get("comment_templates_by_profile") or {}
+    legacy = remote.get("comment_templates") or []
+    cfgs = [profile_cfg(base, name, gl, pc, rows, by_profile.get(name, legacy))
+            for name, pc in (gl.get("profiles") or {}).items() if pc.get("enabled")]
     if not cfgs:
         print("Tiada profile diaktifkan di halaman Auto Reels.")
         return []
