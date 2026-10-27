@@ -96,6 +96,77 @@ def threads_candidates(url: str) -> list[str]:
     return [f"{base}/embed", base]
 
 
+def _unescape_url(u: str) -> str:
+    u = u.replace("\\/", "/").replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u0025", "%")
+    return html.unescape(u)
+
+
+def strip_byte_range(u: str) -> str:
+    """Pautan video Meta kadang-kadang membawa bytestart/byteend (sebahagian fail sahaja) → buang supaya fail penuh."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(u)
+    q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k not in ("bytestart", "byteend")]
+    return urlunsplit(parts._replace(query=urlencode(q)))
+
+
+_PW_READY = False
+
+
+def ensure_chromium() -> None:
+    """Pasang Chromium untuk Playwright hanya bila diperlukan (cth. pautan Threads)."""
+    global _PW_READY
+    if _PW_READY:
+        return
+    subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                   check=True, timeout=900, capture_output=True)
+    _PW_READY = True
+
+
+def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000) -> tuple[str, str, str]:
+    """Buka halaman dalam Chromium (tanpa paparan) seperti pelawat biasa, tangkap fail video yang dimuatkan
+    oleh JavaScript halaman (Threads memuatkan video selepas halaman dibuka). Pulangkan (mp4, tajuk, thumbnail)."""
+    ensure_chromium()
+    from playwright.sync_api import sync_playwright
+
+    seen: list[str] = []
+    with sync_playwright() as p:
+        launch = {"headless": True}
+        if proxy:
+            launch["proxy"] = {"server": proxy}
+        browser = p.chromium.launch(**launch)
+        ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
+        page = ctx.new_page()
+
+        def on_response(r):
+            try:
+                ct = (r.headers or {}).get("content-type", "")
+                if ".mp4" in r.url or ct.startswith("video/"):
+                    seen.append(r.url)
+            except Exception:
+                pass
+        page.on("response", on_response)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(3000)
+        page.keyboard.press("Escape")                    # tutup popup "log masuk"
+        try:
+            page.evaluate("() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play().catch(() => {}); } }")
+        except Exception:
+            pass
+        page.wait_for_timeout(wait_ms)
+        info = page.evaluate("""() => {
+            const v = document.querySelector('video');
+            const og = (p) => (document.querySelector(`meta[property="${p}"]`) || {}).content || '';
+            return { src: v ? (v.currentSrc || v.src || '') : '', poster: v ? (v.poster || '') : '',
+                     title: og('og:title') || og('og:description') || document.title || '', image: og('og:image') };
+        }""")
+        browser.close()
+    src = info.get("src") or ""
+    mp4 = src if src.startswith("http") else next((u for u in seen if ".mp4" in u), seen[0] if seen else "")
+    if not mp4:
+        raise DownloadError("Tiada video dimuatkan oleh halaman (post mungkin gambar sahaja atau peribadi).")
+    return strip_byte_range(mp4), info.get("title") or "", info.get("poster") or info.get("image") or ""
+
+
 def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
     """Sandaran untuk laman yang yt-dlp tidak kenal (cth. Threads): cari pautan mp4 dalam HTML halaman.
     Pulangkan (mp4_url, tajuk, thumbnail)."""
@@ -114,6 +185,12 @@ def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
         m = re.search(r'<(?:video|source)\b[^>]*\bsrc=["\']([^"\']+)', text, re.I)
         if m and not m.group(1).startswith("blob:"):
             mp4 = m.group(1)
+    if not mp4:                                       # JSON yang di-escape dalam <script> (\"video_versions\")
+        i = text.find("video_versions")
+        if i >= 0:
+            m = re.search(r'(https?:(?:\\\\?/){2}[^"\s<>]*?\.mp4[^"\s<>]*?)(?=\\\\?")', text[i:i + 6000])
+            if m:
+                mp4 = _unescape_url(m.group(1))
     if not mp4:
         m = re.search(r'"video_versions"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"', text)
         if m:
@@ -218,6 +295,17 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
                 break
             except Exception as e2:
                 last_err = e2
+        if last_err is not None and threads_candidates(url):
+            # Threads memuatkan video melalui JavaScript → buka dalam Chromium tanpa paparan
+            try:
+                print("   Threads: cuba melalui browser (Chromium)…")
+                mp4, title, thumb = browser_video_url(threads_candidates(url)[1], env("PROXY_URL"))
+                download(mp4, path)
+                if not _has_video(path):
+                    raise DownloadError("Fail yang dimuatkan oleh halaman bukan video.")
+                last_err = None
+            except Exception as e3:
+                last_err = e3
         if last_err is not None:
             raise DownloadError(f"Laman tidak disokong atau video tidak awam ({str(last_err)[:150]}).") from e
         return {"path": ensure_facebook_mp4(path), "title": title, "description": "", "thumb": thumb, "duration": 0}
