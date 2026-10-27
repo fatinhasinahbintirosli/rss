@@ -112,6 +112,32 @@ class TestHanging(unittest.TestCase):
         self.assertIn("TERGANTUNG", cap.build_prompt(1, "", []))
 
 
+class TestManyPages(unittest.TestCase):
+    def test_100_pages_chunked_and_filled(self):
+        import itertools
+        counter = itertools.count()
+        asks = []
+
+        def ask(prompt):
+            asks.append(prompt)
+            k = int(prompt.split("Tulis ")[1].split(" ")[0])
+            import hashlib
+            words = ["pakcik", "budak", "makcik", "abang", "kakak", "adik", "staff", "pelanggan", "pemandu", "jiran",
+                     "kucing", "lori", "kereta", "kedai", "pasar", "sekolah", "jalan", "rumah", "hujan", "banjir"]
+            out = []
+            for _ in range(k):
+                h = hashlib.md5(str(next(counter)).encode()).hexdigest()
+                w = [words[int(h[j:j + 2], 16) % len(words)] for j in range(0, 10, 2)]
+                out.append(f"{w[0]} {h[:4]} {w[1]} {h[4:8]} {w[2]} bila")
+            return {"captions": out}
+        out, _ = cap.generate(None, 100, "", [], ask)
+        self.assertEqual(len(out), 100)
+        self.assertEqual(len(set(out)), 100)
+        self.assertLessEqual(max(int(a.split("Tulis ")[1].split(" ")[0]) for a in asks), cap.CHUNK + 3)
+        self.assertEqual(cap.fill_to(["a", "b"], 5), ["a", "b", "a", "b", "a"])
+        self.assertEqual(cap.fill_to([], 5), [])
+
+
 class FakePostolab:
     def __init__(self):
         self.uploads, self.calls = 0, []
@@ -432,6 +458,19 @@ class TestRemote(unittest.TestCase):
         out = relay.run_remote(self.base, self.settings, api, {"settings": {**st, "paused": True}, "items": []},
                                feed, api.pages(), process=lambda *a, **k: 1 / 0)
         self.assertEqual(out, [])
+
+    def test_comment_templates_per_profile(self):
+        api, seen = FakeRemoteApi(), {}
+
+        def process(item, pages, c, settings, state, api_, cache=None):
+            seen[c.profile] = c.comment_text
+            return {"status": "skipped", "summary": "", "reasons": []}
+        st = remote_settings(comment_id="a1")
+        st["profiles"]["kedua"]["comment_id"] = "a1"
+        remote = {"settings": st, "items": [], "comment_templates_by_profile": {
+            "deli": [{"id": "a1", "text": "Komen deli"}], "kedua": [{"id": "a1", "text": "Komen kedua"}]}}
+        relay.run_remote(self.base, self.settings, api, remote, self.FEED[:2], api.pages(), process=process)
+        self.assertEqual(seen, {"deli": "Komen deli", "kedua": "Komen kedua"})
 
     def test_error_saved_with_tries(self):
         api = FakeRemoteApi()

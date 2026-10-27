@@ -478,7 +478,8 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
             rec["error"] = "Gemini gagal hasilkan caption yang menepati syarat."
             return rec
         if len(caps) < len(targets):
-            log(f"   nota: hanya {len(caps)} caption sah untuk {len(targets)} page; page selebihnya dilangkau.")
+            log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} page; sebahagian page guna caption berulang.")
+            caps = cap.fill_to(caps, len(targets))
         posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
         comment = (item.get("comment_text") or "").strip() or None
         comment_img = None

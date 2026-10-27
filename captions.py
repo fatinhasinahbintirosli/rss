@@ -171,22 +171,34 @@ def pick_captions(candidates: list[str], n: int, history: list[str], max_words: 
     return chosen, rejected
 
 
+CHUNK = 25   # caption setiap permintaan Gemini (banyak Page → beberapa permintaan)
+
+
+def fill_to(captions: list[str], n: int) -> list[str]:
+    """Jika caption unik tidak cukup untuk semua Page, ulang caption sedia ada (lebih baik dari Page dilangkau)."""
+    if not captions:
+        return []
+    return [captions[i % len(captions)] for i in range(n)]
+
+
 def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3,
              max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False):
-    """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up."""
+    """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up.
+    Untuk banyak Page (cth. 100), caption diminta berperingkat (CHUNK setiap permintaan)."""
     chosen: list[str] = []
     rejected_all: list[str] = []
+    rounds = max(rounds, -(-n // CHUNK) + 2)
     for rnd in range(rounds):
         need = n - len(chosen)
         if need <= 0:
             break
-        data = ask(build_prompt(need + 3, source_caption, history + chosen, max_words, suffix, short))
+        data = ask(build_prompt(min(need, CHUNK) + 3, source_caption, history + chosen, max_words, suffix, short))
         cands = data.get("captions") if isinstance(data, dict) else None
         if not isinstance(cands, list):
             rejected_all.append("jawapan Gemini tiada senarai captions")
             continue
         # Pusingan awal: hanya ayat tergantung. Pusingan terakhir: terima ayat biasa supaya tidak gagal.
-        got, rej = pick_captions([str(c) for c in cands], need, history + chosen, max_words, suffix, short,
+        got, rej = pick_captions([str(c) for c in cands], min(need, CHUNK + 3), history + chosen, max_words, suffix, short,
                                  allow_flat=(rnd == rounds - 1))
         chosen.extend(got)
         rejected_all.extend(rej)

@@ -333,7 +333,8 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             rec.update(status="error", summary="Gemini gagal hasilkan caption yang menepati syarat.")
             return rec
         if len(caps) < len(targets):
-            log(f"   nota: hanya {len(caps)} caption sah untuk {len(targets)} Page; Page selebihnya dilangkau.")
+            log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} Page; sebahagian Page guna caption berulang.")
+            caps = cap.fill_to(caps, len(targets))
         posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
         comment_img = None
         if cfg.comment_text:
