@@ -85,6 +85,17 @@ def ensure_facebook_mp4(path: str) -> str:
     return out
 
 
+def threads_candidates(url: str) -> list[str]:
+    """Pautan Threads (threads.com / threads.net, termasuk hujung /media atau ?xmt=...) → halaman embed
+    (HTML lengkap dengan <video>) dan halaman post biasa, untuk dicuba satu demi satu."""
+    m = re.search(r"threads\.(?:com|net)/@([\w.\-]+)/post/([\w\-]+)", url or "", re.I)
+    if not m:
+        return []
+    user, code = m.group(1), m.group(2)
+    base = f"https://www.threads.com/@{user}/post/{code}"
+    return [f"{base}/embed", base]
+
+
 def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
     """Sandaran untuk laman yang yt-dlp tidak kenal (cth. Threads): cari pautan mp4 dalam HTML halaman.
     Pulangkan (mp4_url, tajuk, thumbnail)."""
@@ -99,6 +110,10 @@ def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
         return html.unescape(m.group(1)) if m else ""
 
     mp4 = meta("og:video:secure_url") or meta("og:video:url") or meta("og:video")
+    if not mp4:
+        m = re.search(r'<(?:video|source)\b[^>]*\bsrc=["\']([^"\']+)', text, re.I)
+        if m and not m.group(1).startswith("blob:"):
+            mp4 = m.group(1)
     if not mp4:
         m = re.search(r'"video_versions"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"', text)
         if m:
@@ -192,14 +207,19 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         # Untuk laman yang disokong (YouTube, TikTok, FB...) tunjukkan ralat sebenar.
         if "unsupported url" not in first.lower() or is_known_site(url):
             raise DownloadError(_friendly(first) or first[:300]) from e
-        try:
-            mp4, title, thumb = _page_video_url(url)
-            path = os.path.join(outdir, "video_page.mp4")
-            download(mp4, path)
-            if not _has_video(path):
-                raise DownloadError("Pautan video dalam halaman bukan fail video.")
-        except Exception as e2:
-            raise DownloadError(f"Laman tidak disokong atau video tidak awam ({str(e2)[:150]}).") from e
+        path, title, thumb, last_err = os.path.join(outdir, "video_page.mp4"), "", "", None
+        for page in threads_candidates(url) or [url]:
+            try:
+                mp4, title, thumb = _page_video_url(page)
+                download(mp4, path)
+                if not _has_video(path):
+                    raise DownloadError("Pautan video dalam halaman bukan fail video.")
+                last_err = None
+                break
+            except Exception as e2:
+                last_err = e2
+        if last_err is not None:
+            raise DownloadError(f"Laman tidak disokong atau video tidak awam ({str(last_err)[:150]}).") from e
         return {"path": ensure_facebook_mp4(path), "title": title, "description": "", "thumb": thumb, "duration": 0}
 
 
