@@ -25,6 +25,8 @@ jobs:
         timeout-minutes: 10
         run: |
           pip install -r requirements.txt
+          pip install -U "yt-dlp[default]" && pip install -U --pre --no-deps yt-dlp   # nightly: pembaikan Facebook/YouTube keluar di sini dahulu
+          yt-dlp --version
           python -m playwright install --with-deps chromium
 
       - name: Sediakan cookies (pilihan)
@@ -83,6 +85,7 @@ jobs:
         timeout-minutes: 8
         run: |
           pip install -r requirements.txt
+          pip install -U "yt-dlp[default]" && pip install -U --pre --no-deps yt-dlp   # nightly: pembaikan Facebook/YouTube keluar di sini dahulu
 
       - name: Semak video dan jadual ke Postolab
         # Tetapan (profile, sumber, page, slot, mod percubaan, kandungan dibenarkan) diambil dari
