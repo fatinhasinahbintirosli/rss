@@ -28,6 +28,7 @@ import captions as cap
 from video_checker import layer1_technical
 from video_checker.config import Settings
 from video_checker.gemini import GeminiClient
+import claude_writer
 from video_checker.models import BLOCK, INFO, WARN, Finding
 from video_checker.pipeline import check_video, score
 
@@ -267,6 +268,11 @@ def gemini_ask_factory(settings: Settings, path: str):
 
     def ask(prompt: str) -> dict:
         return client.generate_json(f, prompt)
+
+    # Pilihan: Claude tulis ayat (Gemini terangkan video), Gemini jadi sandaran jika Claude gagal
+    writer = claude_writer.from_env()
+    if writer:
+        ask = writer.wrap(ask, describe=lambda: client.generate_json(f, claude_writer.DESCRIBE_PROMPT))
 
     return ask, (lambda: client.delete(f))
 
