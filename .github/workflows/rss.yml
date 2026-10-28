@@ -110,6 +110,9 @@ jobs:
           FORCE_BLOCK: ${{ vars.FORCE_BLOCK || 'visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}        # pilihan: Claude tulis caption
+          CLAUDE_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
           AUDD_API_TOKEN: ${{ secrets.AUDD_API_TOKEN }}
           VISUAL_PROVIDER: gemini
           TRANSCRIBE_PROVIDER: none
