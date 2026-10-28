@@ -36,7 +36,7 @@ jobs:
         timeout-minutes: 8
         run: |
           pip install -r requirements.txt
-          pip install -U "yt-dlp[default]"   # versi terbaru + yt-dlp-ejs (laman video kerap berubah)
+          pip install -U "yt-dlp[default]" && pip install -U --pre --no-deps yt-dlp   # nightly: pembaikan Facebook/YouTube keluar di sini dahulu
           deno --version && yt-dlp --version && ffmpeg -version | head -1
 
       # Pilihan: cookies (format Netscape) untuk video yang perlu log masuk, cth. YouTube yang minta "Sign in".
