@@ -98,36 +98,44 @@ def build_prompt(n: int, source_caption: str, avoid: list[str], max_words: int =
     words_rule = (f"ANTARA {min_words} HINGGA {max_words} patah perkataan (cuba pelbagaikan panjang ayat)"
                   if 1 < min_words < max_words else f"MAKSIMUM {max_words} patah perkataan")
     examples = "\n".join(f"- {finalize(e, suffix)}" for e in [
-        "Zaman kita dulu, budak ni akan", "Dpt info, dorg ni rupanya", "Katanya staff ni mrh sbb",
-        "Katanya adik ni ada", "Dpt info laki ni dah"])
+        "Kejadian berpunca sbb", "Dpt info, dorg ni rupanya", "Katanya staff ni mrh sbb",
+        "Katanya penumpang tu jatuh dan terus", "Dpt info laki ni dah"])
     avoid_txt = "\n".join(f"- {a}" for a in avoid[-40:]) or "(tiada)"
     return f"""Tonton video ini. Tulis {n} ayat pembuka caption Facebook yang BERBEZA antara satu sama lain.
 
-Gaya (contoh, perhatikan semuanya tergantung dan tidak dedahkan pengakhiran):
+Gaya (contoh, semuanya gantung pada punca / akibat / latar belakang, bukan babak dalam video):
 {examples}
 
-PALING PENTING — ayat mesti TERGANTUNG:
-- Berhenti TEPAT sebelum bahagian paling menarik / jawapan. Pembaca mesti tertanya "lepas tu apa jadi?".
-- Akhiri dengan perkataan penyambung yang membuatkan ayat tidak lengkap, contohnya:
-  bila, sbb, rupanya, terus, tiba², lepas, sampai, akan, nak, dah, ada, yg, masa, tapi, mcm, kena.
-- JANGAN habiskan cerita, JANGAN beri kesimpulan, JANGAN dedahkan apa yang berlaku di hujung video.
-- Contoh SALAH (sudah lengkap, tiada rasa ingin tahu): "Budak ni jatuh dari basikal", "Kucing comel main bola".
-- Contoh BETUL (tergantung): "Budak ni tengah kayuh basikal tiba²", "Kucing ni main bola sampai dia".
+PALING PENTING — gantung pada perkara yang TIADA dalam video:
+Penonton sudah nampak apa yang berlaku dalam video. Ayat yang menceritakan semula babak dalam video
+tidak membuatkan sesiapa tekan "see more". Gantung pada perkara yang penonton TIDAK nampak:
+- PUNCA / SEBAB kejadian (biasanya video bermula bila kejadian sudah berlaku):
+  "Kejadian berpunca sbb", "Dpt info, dorg bergaduh sbb", "Katanya semua bermula bila".
+- APA JADI SELEPAS video tamat: "Katanya penumpang tu jatuh dan terus", "Lepas kejadian ni, dia terus".
+- LATAR BELAKANG / SIAPA dia: "Dpt info, dorg ni rupanya", "Katanya lelaki ni sebenarnya".
+Sebut kejadian secara RINGKAS dan umum sahaja (cth. "jatuh", "bergaduh"), kemudian terus gantung pada
+punca, akibat atau latar belakang.
 
-JANGAN jadikan perkara yang SUDAH JELAS dalam video sebagai "rahsia":
-- Apa yang penonton boleh nampak sendiri (cth. ada jenazah, orang menangis, kemalangan) — sebut TERUS, jangan gantung.
-- Gantung pada perkara yang BELUM diketahui penonton: sebab, cerita di sebalik, apa berlaku sebelum/selepas, siapa dia.
-- Contoh: video adik mencari ibunya di sisi jenazah ibu.
-  SALAH: "Adik ni cari mummy dia rupanya dah" (semua orang sudah nampak ibunya meninggal).
-  BETUL: "Yg kesiannya, mak dia meninggal sbb" / "Sebelum pergi, mak dia sempat pesan".
-- Tetapi gantung HANYA pada perkara yang ada jawapannya dalam video atau caption asal. Jangan reka misteri
-  atau janji maklumat yang tiada (cth. jangan tulis "meninggal sbb" jika sebabnya tidak disebut langsung).
+Contoh: video penumpang bas terjatuh bila bas brek mengejut.
+  SALAH: "Bas tu brake dan penumpang tu terus" (semua orang sudah nampak dalam video).
+  SALAH: "Penumpang ni tiba² rebah ke lantai bila" (menceritakan semula babak).
+  BETUL: "Katanya penumpang tu jatuh dan terus" / "Dpt info, pemandu tu brek sbb".
+Contoh: video dua orang bergaduh.
+  SALAH: "Lelaki ni tolak kawan dia sampai" (ada dalam video).
+  BETUL: "Kejadian berpunca sbb" / "Dpt info, dorg ni bergaduh sbb".
+
+Peraturan ayat tergantung:
+- Akhiri dengan perkataan penyambung yang membuatkan ayat tidak lengkap, contohnya:
+  sbb, rupanya, terus, bila, lepas, sampai, nak, dah, ada, yg, masa, tapi, kena.
+- JANGAN habiskan cerita, JANGAN beri kesimpulan, JANGAN sebut punca atau akibat sebenar.
+- JANGAN besar-besarkan: jangan bayangkan darah, kecederaan teruk atau kematian yang tidak berlaku.
+  Gaduh biasa tetap "bergaduh", bukan "berlumuran darah".
 
 Syarat setiap ayat:
 - Bahasa Melayu santai, boleh guna singkatan (dpt, dorg, sbb, mrh, nk, tu).{"""
 - Tulis "yg" (bukan "yang"). Kata ganda guna ² (rama², baru², kadang²), bukan rama-rama.""" if short else ""}
 - {words_rule}.
-- Berdasarkan apa yang betul-betul berlaku dalam video. Jangan reka fakta.
+- Kejadian yang disebut mesti betul-betul berlaku dalam video. Jangan reka fakta; biar punca/akibat tergantung.
 - JANGAN tuduh orang dalam video (contoh: jangan guna curi, tipu, pukul, scam).
 - JANGAN sebut bangsa, kaum atau agama. JANGAN ejek orang dalam video.
 - Tiada hashtag, emoji, pautan. Jangan minta like/share/tag/komen.

@@ -33,10 +33,13 @@ Balas JSON sahaja:
 CLAUDE_EXTRA = """
 
 TAMBAHAN — anda pakar caption viral Facebook Malaysia. Matlamat: pembaca WAJIB tekan "see more".
-- Gantung pada perkara dalam senarai "tersembunyi" atau "twist", BUKAN pada "jelas_nampak".
-- Teknik yang berkesan: mula dengan reaksi/emosi lalu putus ("Yg buat semua sebak, rupanya"),
-  sebut akibat tanpa sebab ("Lepas kejadian ni, terus"), atau janji pendedahan ("Tak sangka, rupanya dia").
-- Setiap ayat guna sudut berbeza (sebab, akibat, reaksi orang, apa jadi sebelum, apa jadi selepas).
+- Penerangan di atas memberitahu apa yang penonton SUDAH NAMPAK ("jelas_nampak", "ringkasan").
+  JANGAN ceritakan semula mana-mana babak itu.
+- Gantung pada perkara yang TIADA dalam video: punca kejadian, apa jadi selepas video tamat, siapa
+  orang itu atau cerita di sebaliknya. Jika "tersembunyi" kosong, tetap gantung pada punca atau akibat.
+- Corak terbaik: "Kejadian berpunca sbb", "Katanya <orang> <kejadian ringkas> dan terus",
+  "Dpt info, dorg ni rupanya", "Lepas kejadian ni, dia terus".
+- Setiap ayat guna sudut berbeza (punca, akibat, latar belakang, reaksi orang selepas).
 - Ayat mesti berbunyi macam orang Malaysia biasa menaip, bukan macam berita atau iklan."""
 
 
