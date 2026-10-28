@@ -52,6 +52,9 @@ jobs:
           POSTOLAB_API_KEY: ${{ secrets.POSTOLAB_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}        # pilihan: Claude tulis caption
+          CLAUDE_BASE_URL: ${{ vars.CLAUDE_BASE_URL }}
+          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
           LINK_MAX_PER_RUN: ${{ vars.LINK_MAX_PER_RUN || '10' }}
           LINK_MAX_MINUTES: ${{ vars.LINK_MAX_MINUTES || '15' }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
