@@ -72,6 +72,7 @@ class Cfg:
         self.caption_max_words = cap.MAX_WORDS  # maks perkataan sebelum ayat penutup
         self.caption_min_words = 1              # min perkataan (julat "dari X hingga Y")
         self.caption_short = False              # yang → yg, kata ganda → ²
+        self.caption_unique = True              # True: caption berlainan setiap Page; False: satu caption untuk semua
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
@@ -330,7 +331,8 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
         ask, cleanup = ask_factory(settings, path)
         try:
             history = state.get("captions", [])[-300:]
-            caps, rejected = cap.generate(path, len(targets), item["caption"], history, ask,
+            n_caps = len(targets) if cfg.caption_unique else 1
+            caps, rejected = cap.generate(path, n_caps, item["caption"], history, ask,
                                           max_words=cfg.caption_max_words, min_words=cfg.caption_min_words, suffix=cfg.caption_suffix,
                                           short=cfg.caption_short)
         finally:
@@ -340,7 +342,10 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             rec.update(status="error", summary="Gemini gagal hasilkan caption yang menepati syarat.")
             return rec
         if len(caps) < len(targets):
-            log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} Page; sebahagian Page guna caption berulang.")
+            if cfg.caption_unique:
+                log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} Page; sebahagian Page guna caption berulang.")
+            else:
+                log(f"   caption sama untuk semua {len(targets)} Page: {caps[0]}")
             caps = cap.fill_to(caps, len(targets))
         posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
         comment_img = None
@@ -404,6 +409,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
         c.stagger, c.slots = 0, {"source": "profile"}
     c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
     c.caption_short = pc.get("caption_short", True) is not False
+    c.caption_unique = pc.get("caption_unique", True) is not False
     tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
     c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
     c.comment_image = pc.get("comment_image", True) is not False

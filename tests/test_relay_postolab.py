@@ -95,6 +95,8 @@ class TestCustomEnding(unittest.TestCase):
         d = relay.profile_cfg(relay.Cfg(), "deli", {}, {}, {})
         self.assertEqual((d.caption_suffix, d.caption_max_words, d.caption_short), ("...see-moo.re", 7, True))
         self.assertFalse(relay.profile_cfg(relay.Cfg(), "x", {}, {"caption_short": False}, {}).caption_short)
+        self.assertTrue(d.caption_unique)
+        self.assertFalse(relay.profile_cfg(relay.Cfg(), "x", {}, {"caption_unique": False}, {}).caption_unique)
 
 
 class TestHanging(unittest.TestCase):

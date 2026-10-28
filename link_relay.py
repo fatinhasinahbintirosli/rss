@@ -371,6 +371,8 @@ def is_known_site(url: str) -> bool:
 
 def _friendly(msg: str) -> str:
     m = msg.lower()
+    if "impersonate target" in m:
+        return "yt-dlp tidak dapat menyamar pelayar (curl_cffi tidak sepadan)."
     if "sign in to confirm" in m or "not a bot" in m:
         return "YouTube minta log masuk (sekatan bot). Tambah cookies YouTube dalam secret LINK_COOKIES."
     if "private" in m or "login" in m or "log in" in m:
@@ -378,6 +380,8 @@ def _friendly(msg: str) -> str:
     if "requested format is not available" in m or "only images are available" in m:
         return ("YouTube tidak beri format video. Pastikan workflow link.yml terbaru (dengan Deno) dipasang, "
                 "atau tambah cookies YouTube dalam secret LINK_COOKIES.")
+    if "impersonate target" in m:
+        return "yt-dlp tidak dapat menyamar pelayar (curl_cffi tidak sepadan)."
     if "unsupported url" in m:
         return ""
     if "po token" in m or "http error 403" in m or "403: forbidden" in m:
@@ -506,6 +510,7 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
     max_words = max(3, min(25, int(pc.get("caption_max_words") or cap.MAX_WORDS)))
     min_words = max(1, min(max_words, int(pc.get("caption_min_words") or 1)))
     short = pc.get("caption_short", True) is not False
+    unique = pc.get("caption_unique", True) is not False   # False: satu caption untuk semua page
 
     with tempfile.TemporaryDirectory() as td:
         v = fetcher(item["url"], td, int(env("LINK_MAX_MINUTES", "15") or 15), env("COOKIES_FILE"), env("PROXY_URL"))
@@ -520,7 +525,7 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         context = " ".join(x for x in [v.get("title"), (v.get("description") or "")[:500]] if x)
         ask, cleanup = ask_factory(settings, v["path"])
         try:
-            caps, rejected = cap.generate(v["path"], len(targets), context, history, ask,
+            caps, rejected = cap.generate(v["path"], len(targets) if unique else 1, context, history, ask,
                                           max_words=max_words, min_words=min_words, suffix=suffix, short=short)
         finally:
             cleanup()
@@ -530,7 +535,10 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
             rec["error"] = "Gemini gagal hasilkan caption yang menepati syarat."
             return rec
         if len(caps) < len(targets):
-            log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} page; sebahagian page guna caption berulang.")
+            if unique:
+                log(f"   nota: hanya {len(caps)} caption unik untuk {len(targets)} page; sebahagian page guna caption berulang.")
+            else:
+                log(f"   caption sama untuk semua {len(targets)} page: {caps[0]}")
             caps = cap.fill_to(caps, len(targets))
         posts = [{"pageId": str(p["page_id"]), "message": c} for p, c in zip(targets, caps)]
         comment = (item.get("comment_text") or "").strip() or None

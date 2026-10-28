@@ -86,6 +86,22 @@ class TestLinkRelay(unittest.TestCase):
         self.assertEqual(rec["thumb_url"], "https://t/1.jpg")
         self.assertEqual(len(hist), 2)
 
+    def test_same_caption_for_all_pages_when_unique_off(self):
+        api, prompts = FakeApi(), []
+
+        def ask_factory(settings, path):
+            def ask(prompt):
+                prompts.append(prompt)
+                return {"captions": ["Katanya penumpang tu jatuh dan terus", "Dpt info dorg ni rupanya"]}
+            return ask, (lambda: None)
+        rec = lr.process_link({"id": "u1", "profile": "deli", "url": "u"}, {"caption_unique": False, "caption_suffix": "..."},
+                              PAGES, self.settings, [], api, fetcher=fetcher(), ask_factory=ask_factory, log=lambda m: None)
+        self.assertEqual(rec["status"], "posted", rec)
+        msgs = [p["message"] for p in api.calls[0]["posts"]]
+        self.assertEqual(len(msgs), 3)
+        self.assertEqual(len(set(msgs)), 1)                 # semua page caption sama
+        self.assertIn("Tulis 4 ayat", prompts[0])           # minta 1 (+3 simpanan), bukan 3+3
+
     def test_no_targets_and_already_scheduled(self):
         item = {"id": "1", "profile": "deli", "url": "u"}
         rec = lr.process_link(item, {"target_mode": "selected", "target_page_ids": []}, PAGES, self.settings, [],
@@ -218,6 +234,51 @@ class TestLinkRelay(unittest.TestCase):
                          "schedule_at": "2099-01-02T03:04:00+00:00"}, {}, PAGES[:1], self.settings, [], api,
                         fetcher=fetcher(), ask_factory=asker(["Pakcik ni tenang je bila"]), log=lambda m: None)
         self.assertEqual(api.calls[0]["when"], "2099-01-02T03:04:00+00:00")
+
+    def test_threads_urls(self):
+        c = lr.threads_candidates("https://www.threads.com/@mija.sara/post/De-006rkyiQ/media")
+        self.assertEqual(c, ["https://www.threads.com/@mija.sara/post/De-006rkyiQ/embed",
+                             "https://www.threads.com/@mija.sara/post/De-006rkyiQ"])
+        self.assertEqual(lr.threads_candidates("https://www.threads.net/@a_b/post/XyZ?xmt=1")[1],
+                         "https://www.threads.com/@a_b/post/XyZ")
+        self.assertEqual(lr.threads_candidates("https://youtu.be/x"), [])
+
+        class R:
+            def __init__(self, t): self.text = t
+            def raise_for_status(self): pass
+
+        class S:
+            def get(self, *a, **k):
+                return R('<div><video playsinline src="https://scontent.cdninstagram.com/o1/v/t2/a.mp4?x=1&amp;y=2"></video></div>')
+        self.assertEqual(lr._page_video_url("u", S())[0], "https://scontent.cdninstagram.com/o1/v/t2/a.mp4?x=1&y=2")
+
+    def test_multiple_schedule_times(self):
+        api = FakeApi()
+        times = ["2099-01-02T03:00:00+00:00", "2099-01-02T05:00:00+00:00", "2099-01-03T03:00:00+00:00"]
+        rec = lr.process_link({"id": "m", "profile": "deli", "url": "u", "schedule_mode": "at", "schedule_times": times},
+                              {}, PAGES[:2], self.settings, [], api, fetcher=fetcher(),
+                              ask_factory=asker(["Pakcik ni tenang je bila", "Ramai orang terkejut bila"]), log=lambda m: None)
+        self.assertEqual(rec["status"], "posted")
+        self.assertEqual([c["when"] for c in api.calls], times)
+        self.assertEqual([c["sid"] for c in api.calls], ["link:m", "link:m@1", "link:m@2"])
+        self.assertEqual(len(rec["scheduled"]), 6)                            # 3 masa × 2 page
+        self.assertEqual(api.uploads, 1)                                       # video dimuat naik sekali sahaja
+        self.assertEqual(len({c["posts"][0]["message"] for c in api.calls}), 1)  # caption sama setiap masa
+
+    def test_threads_escaped_json_and_byte_range(self):
+        class R:
+            def __init__(self, t): self.text = t
+            def raise_for_status(self): pass
+
+        class S:
+            def __init__(self, t): self.t = t
+            def get(self, *a, **k): return R(self.t)
+        page = ('<script type="application/json">{\\"video_versions\\":[{\\"type\\":101,\\"url\\":'
+                '\\"https:\\/\\/scontent.cdninstagram.com\\/o1\\/v\\/t16\\/f2\\/m69\\/a.mp4?efg=x\\u0026_nc_ht=y\\"}]}</script>')
+        self.assertEqual(lr._page_video_url("u", S(page))[0],
+                         "https://scontent.cdninstagram.com/o1/v/t16/f2/m69/a.mp4?efg=x&_nc_ht=y")
+        self.assertEqual(lr.strip_byte_range("https://x.cdn/v.mp4?a=1&bytestart=0&byteend=999&b=2"),
+                         "https://x.cdn/v.mp4?a=1&b=2")
 
     def test_friendly_errors(self):
         self.assertIn("LINK_COOKIES", lr._friendly("ERROR: Sign in to confirm you're not a bot"))
