@@ -36,7 +36,10 @@ jobs:
         timeout-minutes: 8
         run: |
           pip install -r requirements.txt
-          pip install -U "yt-dlp[default]" && pip install -U --pre --no-deps yt-dlp   # nightly: pembaikan Facebook/YouTube keluar di sini dahulu
+          pip install -U --pre yt-dlp   # nightly: pembaikan Facebook/YouTube keluar di sini dahulu
+          V=$(pip show yt-dlp | awk '/^Version/{print $2}')
+          pip install "yt-dlp[default,curl-cffi]==$V"   # pakej tambahan yang sepadan dengan versi nightly
+          yt-dlp --list-impersonate-targets | head -12 || true
           deno --version && yt-dlp --version && ffmpeg -version | head -1
 
       # Pilihan: cookies (format Netscape) untuk video yang perlu log masuk, cth. YouTube yang minta "Sign in".
@@ -61,3 +64,13 @@ jobs:
           VISUAL_PROVIDER: gemini
           TRANSCRIBE_PROVIDER: none
         run: python link_relay.py
+
+      # Screenshot + HTML halaman Facebook bila video tidak dapat diambil (untuk semakan punca)
+      - name: Simpan maklumat diagnostik
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: link-debug-${{ github.run_number }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 7
