@@ -43,3 +43,32 @@ def test_link_facebook_fallback(monkeypatch, tmp_path):
     assert lr.is_facebook("https://www.facebook.com/watch/?v=1") and not lr.is_facebook("https://youtu.be/x")
     monkeypatch.setattr(f, "browser_fill", lambda *a: 0)
     assert lr.facebook_browser_video("https://www.facebook.com/reel/1/", str(tmp_path)) is None
+
+
+def test_mobile_and_generic():
+    assert f.mobile_url("https://www.facebook.com/reel/12/") == "https://m.facebook.com/reel/12/"
+    assert f.mobile_url("https://web.facebook.com/watch/?v=3") == "https://m.facebook.com/watch/?v=3"
+    attr = '<div data-store="{&quot;src&quot;:&quot;https:\\/\\/video.fbcdn.net\\/v.mp4?x=1&quot;}">'
+    assert f.parse_reel_html(attr)["mp4"] == "https://video.fbcdn.net/v.mp4?x=1"
+    t = '"x":"https:\\/\\/video.fbcdn.net\\/seg.mp4?bytestart=0" "y":"https:\\/\\/video.fbcdn.net\\/full.mp4?a=1"'
+    assert f.generic_mp4(t) == "https://video.fbcdn.net/full.mp4?a=1"
+    assert f.parse_reel_html('<video src="https://v.fbcdn.net/a.mp4"></video>')["mp4"] == "https://v.fbcdn.net/a.mp4"
+
+
+def test_extract_reel_retries_with_impersonate(monkeypatch):
+    import sys, types
+    calls = []
+
+    class YDL:
+        def __init__(self, o): self.o = o
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def extract_info(self, url, download=False):
+            calls.append(self.o.get("impersonate"))
+            if not self.o.get("impersonate"):
+                raise Exception("ERROR: [facebook] 1: Cannot parse data; please report")
+            return {"description": "Kapsyen", "formats": [{"url": "https://v/a.mp4", "ext": "mp4", "vcodec": "h264", "acodec": "aac", "height": 720}]}
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=YDL))
+    monkeypatch.setattr(f, "set_impersonate", lambda o, t: o.__setitem__("impersonate", t) or True)
+    r = f.extract_reel("https://www.facebook.com/reel/5/")
+    assert r.mp4 == "https://v/a.mp4" and not r.error and calls == [None, "firefox"]

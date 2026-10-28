@@ -228,7 +228,8 @@ def pick_tiktok_format(formats: list[dict]) -> tuple[dict | None, bool]:
     return max(pool, key=rank), bool(clean)
 
 
-def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = "", proxy: str = "") -> dict:
+def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = "", proxy: str = "",
+                impersonate: str = "") -> dict:
     """Muat turun video. Pulangkan {path, title, description, thumb, duration, watermark_free}."""
     import yt_dlp
 
@@ -256,6 +257,11 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         opts["cookiefile"] = cookiefile
     if proxy:
         opts["proxy"] = proxy
+    if impersonate:
+        import fb_reels_rss as fbr
+        if not fbr.set_impersonate(opts, impersonate):
+            raise DownloadError(f"impersonate {impersonate} tidak tersedia (curl_cffi belum dipasang)")
+        opts["http_headers"] = {}
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False) or {}
@@ -285,6 +291,18 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         print(f"   yt-dlp: {first[:500]}")
         # Sandaran (cari mp4 dalam halaman) HANYA untuk laman yang yt-dlp tidak kenal (cth. Threads).
         # Untuk laman yang disokong (YouTube, TikTok, FB...) tunjukkan ralat sebenar.
+        if impersonate:
+            raise DownloadError(_friendly(first) or first[:300]) from e
+        if is_facebook(url) and "cannot parse data" in first.lower():
+            # Cara kerja yt-dlp isu #17849: menyamar sebagai pelayar sebenar (perlukan curl_cffi)
+            for tgt in ("firefox", "chrome"):
+                try:
+                    print(f"   Facebook: cuba semula yt-dlp menyamar {tgt}…")
+                    got = fetch_video(url, outdir, max_minutes, cookiefile, proxy, impersonate=tgt)
+                    print(f"   Facebook: berjaya dengan impersonate {tgt}.")
+                    return got
+                except DownloadError as e2:
+                    print(f"   impersonate {tgt}: {str(e2)[:200]}")
         if is_facebook(url):
             # Facebook kerap tukar format halaman sehingga yt-dlp gagal ("Cannot parse data").
             # Sandaran: buka dalam Chromium dan ambil pautan video (ada suara) dari halaman.
@@ -332,7 +350,7 @@ def facebook_browser_video(url: str, outdir: str, cookiefile: str = "", proxy: s
         ensure_chromium()
         reel = fbr.Reel(id="link", url=url)
         if not fbr.browser_fill([reel], proxy, cookiefile) or not reel.mp4:
-            print(f"   Facebook (browser): tiada pautan video dalam halaman. {reel.error}"[:300])
+            print(f"   Facebook (browser): tiada video. {reel.error}"[:400])
             return None
         path = os.path.join(outdir, "video_fb.mp4")
         download(reel.mp4, path)

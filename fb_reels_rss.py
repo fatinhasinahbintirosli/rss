@@ -163,6 +163,23 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
     return urls, signals
 
 
+IMPERSONATE_TARGETS = ("firefox", "chrome")   # Facebook "Cannot parse data": menyamar pelayar sering berjaya
+
+
+def set_impersonate(opts: dict, target: str) -> bool:
+    """Tetapkan --impersonate dalam opts yt-dlp. False jika curl_cffi / sasaran tidak tersedia."""
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        opts["impersonate"] = ImpersonateTarget.from_str(target)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def is_parse_error(msg: str) -> bool:
+    return "cannot parse data" in (msg or "").lower()
+
+
 def extract_reel(reel_url: str, proxy: str = "", cookiefile: str = "") -> Reel:
     import yt_dlp
 
@@ -173,11 +190,21 @@ def extract_reel(reel_url: str, proxy: str = "", cookiefile: str = "") -> Reel:
         opts["proxy"] = proxy
     if cookiefile:
         opts["cookiefile"] = cookiefile
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(reel_url, download=False) or {}
-    except Exception as e:
-        reel.error = str(e)[:300]
+    info, last = None, None
+    for target in ("",) + IMPERSONATE_TARGETS:
+        o = dict(opts)
+        if target:
+            if not is_parse_error(str(last)) or not set_impersonate(o, target):
+                break
+            o.pop("user_agent", None)          # biar curl_cffi guna pengepala pelayar sebenar
+        try:
+            with yt_dlp.YoutubeDL(o) as ydl:
+                info = ydl.extract_info(reel_url, download=False) or {}
+            break
+        except Exception as e:  # noqa: BLE001
+            last = e
+    if info is None:
+        reel.error = str(last)[:300]
         return reel
     reel.caption, reel.caption_truncated = clean_caption(info.get("description") or "")
     reel.mp4, reel.width, reel.height = pick_best_mp4(info)
@@ -198,16 +225,33 @@ def _unescape_json(s: str) -> str:
         return s.replace("\\/", "/")
 
 
+_GENERIC_MP4 = re.compile(r'https?:(?:\\\\?/){2}[^"\'\s<>]+?\.mp4(?:\?[^"\'\s<>]*)?')
+
+
+def _clean_url(u: str) -> str:
+    u = _unescape_json(u) if "\\" in u else u
+    return html.unescape(u)
+
+
 def parse_reel_html(text: str) -> dict:
-    """Pulangkan {mp4, caption, thumb} dari HTML halaman reel. mp4 kosong jika tiada."""
+    """Pulangkan {mp4, caption, thumb} dari HTML halaman reel (desktop atau mudah alih). mp4 kosong jika tiada."""
     out = {"mp4": "", "caption": "", "thumb": ""}
-    for key in _VIDEO_KEYS:
-        m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)+)"', text)
-        if m:
-            url = _unescape_json(m.group(1))
-            if url.startswith("http"):
-                out["mp4"] = url
+    texts = [text, html.unescape(text)]          # halaman mudah alih simpan JSON dalam atribut (&quot;)
+    for key in _VIDEO_KEYS + ("hd_src", "sd_src", "src"):
+        for t in texts:
+            for m in re.finditer(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)+)"', t):
+                url = _clean_url(m.group(1))
+                if url.startswith("http") and (key != "src" or ".mp4" in url):
+                    out["mp4"] = url
+                    break
+            if out["mp4"]:
                 break
+        if out["mp4"]:
+            break
+    if not out["mp4"]:
+        m = re.search(r'<video\b[^>]*\bsrc=["\'](https?://[^"\']+)', text, re.I)
+        if m:
+            out["mp4"] = html.unescape(m.group(1))
 
     def meta(prop):
         m = re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)', text) or \
@@ -221,6 +265,23 @@ def parse_reel_html(text: str) -> dict:
     out["caption"] = cap
     out["thumb"] = meta("og:image")
     return out
+
+
+def generic_mp4(text: str) -> str:
+    """Pilihan terakhir: mana-mana pautan .mp4 fbcdn dalam halaman (bukan serpihan DASH 'bytestart')."""
+    for m in _GENERIC_MP4.finditer(text):
+        u = _clean_url(m.group(0))
+        if "fbcdn" in u and "bytestart" not in u:
+            return u
+    return ""
+
+
+MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1")
+
+
+def mobile_url(url: str) -> str:
+    return re.sub(r"^https?://(?:www\.|web\.|m\.)?facebook\.com", "https://m.facebook.com", url)
 
 
 def _netscape_cookies(path: str) -> list[dict]:
@@ -247,35 +308,107 @@ def _netscape_cookies(path: str) -> list[dict]:
     return cookies
 
 
-def browser_fill(reels: list["Reel"], proxy: str = "", cookiefile: str = "") -> int:
-    """Cuba isi mp4/caption untuk reel yang gagal dibaca yt-dlp. Satu pelayar untuk semua. Pulangkan bilangan berjaya."""
+def _page_signals(page) -> list[str]:
+    sig = []
+    try:
+        if re.search(r"facebook\.com/(login|checkpoint)", page.url):
+            sig.append(f"dialih ke {page.url.split('?')[0]}")
+        body = page.inner_text("body")[:4000]
+        if LOGIN_WALL.search(body):
+            sig.append("halaman minta log masuk")
+        if re.search(r"(content isn.t available|kandungan ini tidak tersedia|this video is unavailable)", body, re.I):
+            sig.append("video tidak tersedia / peribadi")
+    except Exception:  # noqa: BLE001
+        pass
+    return sig
+
+
+def _try_page(ctx, url: str, debug: str = "") -> tuple[dict, list[str]]:
+    """Buka satu URL. Pulangkan (hasil parse, isyarat sekatan). Juga tangkap .mp4 dari rangkaian."""
+    seen: list[str] = []
+    page = ctx.new_page()
+
+    def on_response(resp):
+        try:
+            u = resp.url
+            if ".mp4" in u and "fbcdn" in u and "bytestart" not in u:
+                seen.append(u)
+        except Exception:  # noqa: BLE001
+            pass
+    page.on("response", on_response)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(3000)
+        page.keyboard.press("Escape")
+        try:
+            page.evaluate("() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play().catch(() => {}); } }")
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(3000)
+        text = page.content()
+        got = parse_reel_html(text)
+        if not got["mp4"]:
+            src = page.evaluate("() => { const v = document.querySelector('video'); return v ? (v.currentSrc || v.src || '') : ''; }")
+            if src and src.startswith("http"):
+                got["mp4"] = src
+        if not got["mp4"] and seen:
+            got["mp4"] = seen[0]
+        if not got["mp4"]:
+            got["mp4"] = generic_mp4(text)
+        sig = [] if got["mp4"] else _page_signals(page)
+        if not got["mp4"] and debug:
+            os.makedirs(os.path.dirname(debug), exist_ok=True)
+            try:
+                page.screenshot(path=debug + ".png", full_page=False)
+                with open(debug + ".html", "w", encoding="utf-8") as f:
+                    f.write(text)
+            except Exception:  # noqa: BLE001
+                pass
+        return got, sig
+    finally:
+        page.close()
+
+
+def browser_fill(reels: list["Reel"], proxy: str = "", cookiefile: str = "", debug_dir: str = "") -> int:
+    """Cuba isi mp4/caption untuk reel yang gagal dibaca yt-dlp: versi desktop, kemudian versi mudah alih.
+    Satu pelayar untuk semua. Pulangkan bilangan berjaya."""
     todo = [r for r in reels if not r.mp4]
     if not todo:
         return 0
     from playwright.sync_api import sync_playwright
 
+    debug_dir = debug_dir or env("DEBUG_DIR", "debug")
     fixed = 0
     with sync_playwright() as p:
         launch = {"headless": True}
         if proxy:
             launch["proxy"] = {"server": proxy}
         browser = p.chromium.launch(**launch)
-        ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
-        if cookiefile:
-            ck = _netscape_cookies(cookiefile)
-            if ck:
+        cookies = _netscape_cookies(cookiefile) if cookiefile else []
+        cookies = [c for c in cookies if "facebook" in c.get("domain", "")]
+
+        def context(ua, mobile):
+            vp = {"width": 390, "height": 844} if mobile else {"width": 1280, "height": 900}
+            ctx = browser.new_context(user_agent=ua, viewport=vp, locale="ms-MY", is_mobile=mobile, has_touch=mobile)
+            if cookies:
                 try:
-                    ctx.add_cookies(ck)
+                    ctx.add_cookies(cookies)
                 except Exception as e:  # noqa: BLE001
                     print(f"      cookies tidak dapat dimuat ke pelayar: {e}"[:200])
-        page = ctx.new_page()
+            return ctx
+
+        desktop, mobile = context(UA, False), context(MOBILE_UA, True)
+        print(f"      pelayar: cookies Facebook {'ADA (' + str(len(cookies)) + ')' if cookies else 'TIADA'}")
         for r in todo:
-            try:
-                page.goto(r.url, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(3500)
-                got = parse_reel_html(page.content())
-            except Exception as e:  # noqa: BLE001
-                got, r.error = {"mp4": ""}, f"{r.error} | pelayar: {e}"[:300]
+            got, notes = {"mp4": ""}, []
+            for ctx, url, tag in ((desktop, r.url, "desktop"), (mobile, mobile_url(r.url), "mudah alih")):
+                try:
+                    got, sig = _try_page(ctx, url, os.path.join(debug_dir, "fb", f"{r.id}-{tag.replace(' ', '')}"))
+                except Exception as e:  # noqa: BLE001
+                    got, sig = {"mp4": ""}, [f"ralat: {str(e)[:120]}"]
+                if got.get("mp4"):
+                    break
+                notes.append(f"{tag}: {', '.join(sig) or 'tiada pautan video dalam halaman'}")
             if got.get("mp4"):
                 r.mp4 = got["mp4"]
                 if not r.caption and got.get("caption"):
@@ -283,6 +416,8 @@ def browser_fill(reels: list["Reel"], proxy: str = "", cookiefile: str = "") -> 
                 r.thumb = r.thumb or got.get("thumb", "")
                 r.error = ""
                 fixed += 1
+            else:
+                r.error = ("pelayar: " + " | ".join(notes))[:300]
             time.sleep(1.0)
         browser.close()
     return fixed
