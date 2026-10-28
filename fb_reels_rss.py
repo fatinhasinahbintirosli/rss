@@ -185,6 +185,109 @@ def extract_reel(reel_url: str, proxy: str = "", cookiefile: str = "") -> Reel:
     return reel
 
 
+# ------------------------------------------------------------------ sandaran pelayar
+# Bila yt-dlp gagal ("Cannot parse data" — Facebook tukar format halaman), buka reel dalam Chromium
+# dan cari pautan video (yang ada suara) terus dalam HTML halaman.
+_VIDEO_KEYS = ("browser_native_hd_url", "playable_url_quality_hd", "browser_native_sd_url", "playable_url")
+
+
+def _unescape_json(s: str) -> str:
+    try:
+        return json.loads(f'"{s}"')
+    except Exception:
+        return s.replace("\\/", "/")
+
+
+def parse_reel_html(text: str) -> dict:
+    """Pulangkan {mp4, caption, thumb} dari HTML halaman reel. mp4 kosong jika tiada."""
+    out = {"mp4": "", "caption": "", "thumb": ""}
+    for key in _VIDEO_KEYS:
+        m = re.search(rf'"{key}"\s*:\s*"((?:[^"\\]|\\.)+)"', text)
+        if m:
+            url = _unescape_json(m.group(1))
+            if url.startswith("http"):
+                out["mp4"] = url
+                break
+
+    def meta(prop):
+        m = re.search(rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']*)', text) or \
+            re.search(rf'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']', text)
+        return html.unescape(m.group(1)).strip() if m else ""
+
+    cap = meta("og:description") or meta("description")
+    if not cap:
+        m = re.search(r'"message"\s*:\s*\{[^{}]*?"text"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+        cap = _unescape_json(m.group(1)) if m else ""
+    out["caption"] = cap
+    out["thumb"] = meta("og:image")
+    return out
+
+
+def _netscape_cookies(path: str) -> list[dict]:
+    cookies = []
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#HttpOnly_"):
+                    line = line[len("#HttpOnly_"):]
+                elif not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                domain, _, cpath, secure, expires, name, value = parts[:7]
+                c = {"name": name, "value": value, "domain": domain, "path": cpath or "/",
+                     "secure": secure.upper() == "TRUE"}
+                if expires.isdigit() and int(expires) > 0:
+                    c["expires"] = int(expires)
+                cookies.append(c)
+    except OSError:
+        pass
+    return cookies
+
+
+def browser_fill(reels: list["Reel"], proxy: str = "", cookiefile: str = "") -> int:
+    """Cuba isi mp4/caption untuk reel yang gagal dibaca yt-dlp. Satu pelayar untuk semua. Pulangkan bilangan berjaya."""
+    todo = [r for r in reels if not r.mp4]
+    if not todo:
+        return 0
+    from playwright.sync_api import sync_playwright
+
+    fixed = 0
+    with sync_playwright() as p:
+        launch = {"headless": True}
+        if proxy:
+            launch["proxy"] = {"server": proxy}
+        browser = p.chromium.launch(**launch)
+        ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
+        if cookiefile:
+            ck = _netscape_cookies(cookiefile)
+            if ck:
+                try:
+                    ctx.add_cookies(ck)
+                except Exception as e:  # noqa: BLE001
+                    print(f"      cookies tidak dapat dimuat ke pelayar: {e}"[:200])
+        page = ctx.new_page()
+        for r in todo:
+            try:
+                page.goto(r.url, wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(3500)
+                got = parse_reel_html(page.content())
+            except Exception as e:  # noqa: BLE001
+                got, r.error = {"mp4": ""}, f"{r.error} | pelayar: {e}"[:300]
+            if got.get("mp4"):
+                r.mp4 = got["mp4"]
+                if not r.caption and got.get("caption"):
+                    r.caption, r.caption_truncated = clean_caption(got["caption"])
+                r.thumb = r.thumb or got.get("thumb", "")
+                r.error = ""
+                fixed += 1
+            time.sleep(1.0)
+        browser.close()
+    return fixed
+
+
 # ------------------------------------------------------------------ RSS
 def build_rss(slug: str, page_url: str, reels: list[Reel]) -> str:
     rss = ET.Element("rss", version="2.0")
@@ -311,6 +414,17 @@ def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], st
             rep.errors.append(f"{r.id}: {r.error}")
         reels.append(r)
         time.sleep(1.5)        # be gentle
+    failed = [r for r in reels if not r.mp4]
+    if failed:
+        print(f"      yt-dlp gagal untuk {len(failed)} reel. Cuba melalui pelayar...")
+        try:
+            n = browser_fill(failed, cfg["proxy"], cfg["cookiefile"])
+            print(f"      Pelayar berjaya dapatkan {n}/{len(failed)} video")
+            if n:
+                ok_ids = {r.id for r in failed if r.mp4}
+                rep.errors = [e for e in rep.errors if e.split(":", 1)[0] not in ok_ids]
+        except Exception as e:  # noqa: BLE001
+            print(f"      Pelayar gagal: {e}"[:300])
     rep.with_mp4 = sum(1 for r in reels if r.mp4)
     rep.with_caption = sum(1 for r in reels if r.caption)
 
