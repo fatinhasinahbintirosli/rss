@@ -25,3 +25,21 @@ def test_netscape_cookies(tmp_path):
     p.write_text("# Netscape\n.facebook.com\tTRUE\t/\tTRUE\t1999999999\tc_user\t123\n#HttpOnly_.facebook.com\tTRUE\t/\tTRUE\t0\txs\tabc\n")
     ck = f._netscape_cookies(str(p))
     assert [c["name"] for c in ck] == ["c_user", "xs"] and ck[0]["expires"] == 1999999999 and "expires" not in ck[1]
+
+
+def test_link_facebook_fallback(monkeypatch, tmp_path):
+    import link_relay as lr
+    monkeypatch.setattr(lr, "ensure_chromium", lambda: None)
+
+    def fill(reels, proxy, cookiefile):
+        reels[0].mp4, reels[0].caption = "https://v.fbcdn.net/hd.mp4", "Katanya"
+        return 1
+    monkeypatch.setattr(f, "browser_fill", fill)
+    monkeypatch.setattr(lr, "download", lambda u, p: open(p, "wb").write(b"x"))
+    monkeypatch.setattr(lr, "_has_video", lambda p: True)
+    monkeypatch.setattr(lr, "ensure_facebook_mp4", lambda p: p)
+    got = lr.facebook_browser_video("https://www.facebook.com/reel/1/", str(tmp_path))
+    assert got["description"] == "Katanya" and got["path"].endswith("video_fb.mp4")
+    assert lr.is_facebook("https://www.facebook.com/watch/?v=1") and not lr.is_facebook("https://youtu.be/x")
+    monkeypatch.setattr(f, "browser_fill", lambda *a: 0)
+    assert lr.facebook_browser_video("https://www.facebook.com/reel/1/", str(tmp_path)) is None

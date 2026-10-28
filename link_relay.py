@@ -285,6 +285,12 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         print(f"   yt-dlp: {first[:500]}")
         # Sandaran (cari mp4 dalam halaman) HANYA untuk laman yang yt-dlp tidak kenal (cth. Threads).
         # Untuk laman yang disokong (YouTube, TikTok, FB...) tunjukkan ralat sebenar.
+        if is_facebook(url):
+            # Facebook kerap tukar format halaman sehingga yt-dlp gagal ("Cannot parse data").
+            # Sandaran: buka dalam Chromium dan ambil pautan video (ada suara) dari halaman.
+            got = facebook_browser_video(url, outdir, cookiefile, proxy)
+            if got:
+                return got
         if "unsupported url" not in first.lower() or is_known_site(url):
             raise DownloadError(_friendly(first) or first[:300]) from e
         path, title, thumb, last_err = os.path.join(outdir, "video_page.mp4"), "", "", None
@@ -312,6 +318,33 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         if last_err is not None:
             raise DownloadError(f"Laman tidak disokong atau video tidak awam ({str(last_err)[:150]}).") from e
         return {"path": ensure_facebook_mp4(path), "title": title, "description": "", "thumb": thumb, "duration": 0}
+
+
+def is_facebook(url: str) -> bool:
+    return bool(re.search(r"(facebook\.com|fb\.watch|fb\.com)/", url or "", re.I))
+
+
+def facebook_browser_video(url: str, outdir: str, cookiefile: str = "", proxy: str = "") -> dict | None:
+    """Sandaran Facebook melalui pelayar. Pulangkan dict seperti fetch_video, atau None jika gagal."""
+    import fb_reels_rss as fbr
+    try:
+        print("   Facebook: yt-dlp gagal, cuba melalui browser (Chromium)…")
+        ensure_chromium()
+        reel = fbr.Reel(id="link", url=url)
+        if not fbr.browser_fill([reel], proxy, cookiefile) or not reel.mp4:
+            print(f"   Facebook (browser): tiada pautan video dalam halaman. {reel.error}"[:300])
+            return None
+        path = os.path.join(outdir, "video_fb.mp4")
+        download(reel.mp4, path)
+        if not _has_video(path):
+            print("   Facebook (browser): fail dimuat turun bukan video.")
+            return None
+        print("   Facebook (browser): berjaya.")
+        return {"path": ensure_facebook_mp4(path), "title": "", "description": reel.caption,
+                "thumb": reel.thumb, "duration": 0, "watermark_free": None}
+    except Exception as e:  # noqa: BLE001
+        print(f"   Facebook (browser) gagal: {e}"[:300])
+        return None
 
 
 def is_known_site(url: str) -> bool:
