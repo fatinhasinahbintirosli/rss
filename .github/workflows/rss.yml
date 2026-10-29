@@ -80,9 +80,24 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # ffmpeg + ffprobe versi siap (static build). Tidak guna apt-get, yang kadang-kadang tergantung lama.
-      - uses: FedericoCarboni/setup-ffmpeg@v3
-        timeout-minutes: 5
+      # ffmpeg + ffprobe versi siap (static build dari GitHub BtbN/FFmpeg-Builds).
+      # (Tindakan FedericoCarboni/setup-ffmpeg rosak sejak laman johnvansickle berubah.)
+      # Sandaran: apt-get jika muat turun gagal.
+      - name: Pasang ffmpeg
+        timeout-minutes: 6
+        run: |
+          set -e
+          U=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+          if curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/ff.tar.xz" "$U"; then
+            mkdir -p "$RUNNER_TEMP/ffmpeg"
+            tar -xf "$RUNNER_TEMP/ff.tar.xz" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+            echo "$RUNNER_TEMP/ffmpeg/bin" >> "$GITHUB_PATH"
+            "$RUNNER_TEMP/ffmpeg/bin/ffmpeg" -version | head -1
+          else
+            echo "Muat turun gagal, guna apt-get"
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
 
       - name: Pasang pakej
         timeout-minutes: 8
