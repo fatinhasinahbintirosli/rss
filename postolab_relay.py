@@ -122,9 +122,22 @@ class _KeepAuthSession(requests.Session):
 
 
 class Postolab:
-    def __init__(self, base: str, key: str, session=None):
-        self.base, self.s = base, session or _KeepAuthSession()
+    def __init__(self, base: str, key: str, session=None, as_user: str = ""):
+        self.base, self.s, self.key, self.as_user = base, session or _KeepAuthSession(), key, as_user
         self.h = {"Authorization": f"Bearer {key}"}
+        if as_user:      # bertindak bagi pengguna lain yang dibenarkan (AUTO_REELS_ALLOWED_EMAILS di Postolab)
+            self.h["X-Postolab-User"] = as_user
+
+    def for_user(self, email: str):
+        return type(self)(self.base, self.key, self.s, as_user=email)
+
+    def users(self) -> list[str] | None:
+        """Emel pengguna Auto Reels / Video Link yang ada akaun Postolab (pemilik kunci dahulu).
+        None jika Postolab belum ada /api/external/users atau kunci ini bukan milik emel yang dibenarkan."""
+        r = self.s.get(f"{self.base}/api/external/users", headers={"Authorization": self.h["Authorization"]}, timeout=30)
+        if r.status_code in (403, 404):
+            return None
+        return [u["email"] for u in self._check(r).get("users") or [] if u.get("exists")]
 
     def _check(self, r):
         try:
@@ -173,6 +186,18 @@ class Postolab:
     def save_items(self, items: list[dict]) -> None:
         self._check(self.s.post(f"{self.base}/api/external/auto-reels", headers=self.h, timeout=30,
                                 json={"items": items}))
+
+
+def user_apis(api: Postolab, log=print) -> list[tuple[str, Postolab]]:
+    """[(emel, api)] untuk setiap pengguna yang dibenarkan; [("", api)] jika Postolab belum sokong banyak pengguna."""
+    try:
+        emails = api.users()
+    except Exception as e:  # noqa: BLE001
+        log(f"Tidak dapat baca senarai pengguna ({e}); proses akaun pemilik kunci sahaja.")
+        emails = None
+    if not emails:
+        return [("", api)]
+    return [(e, api.for_user(e)) for e in emails]
 
 
 # ------------------------------------------------------------------ state + report (R2)
@@ -540,6 +565,27 @@ def run() -> int:
     r = requests.get(cfg.rss_url, timeout=30, headers={"User-Agent": UA})
     r.raise_for_status()
     feed = parse_feed(r.text)
+
+    # Banyak pengguna: setiap emel dalam AUTO_REELS_ALLOWED_EMAILS (Postolab) diproses dengan tetapan,
+    # Page dan Queue akaunnya sendiri.
+    users = user_apis(api)
+    if users[0][0] and env("RELAY_MODE", "auto") != "env":
+        all_done = []
+        for email, uapi in users:
+            print(f"\n===== Pengguna: {email} =====")
+            try:
+                pages, remote = uapi.pages(), uapi.remote()
+            except Exception as e:  # noqa: BLE001
+                print(f"   dilangkau: {e}")
+                continue
+            if remote is None:
+                print("   halaman Auto Reels belum dipasang di Postolab.")
+                continue
+            print(f"RSS: {len(feed)} reel | Postolab: {len(pages)} Page | tetapan dari halaman Auto Reels")
+            all_done += run_remote(cfg, settings, uapi, remote, feed, pages)
+        _summary_remote(all_done)
+        return 0
+
     pages = api.pages()
 
     remote = api.remote() if env("RELAY_MODE", "auto") != "env" else None

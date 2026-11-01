@@ -25,7 +25,7 @@ import time
 import requests
 
 import captions as cap
-from postolab_relay import UA, Postolab, download, env, gemini_ask_factory
+from postolab_relay import UA, Postolab, download, env, gemini_ask_factory, user_apis
 from video_checker.config import Settings
 
 MAX_TRIES = 3
@@ -619,13 +619,26 @@ def run() -> int:
         return 2
     settings.visual_provider = "gemini"
     api = LinkApi(env("POSTOLAB_URL", "https://postolab.com").rstrip("/"), key)
-    remote = api.link_remote()
-    if remote is None:
-        print("Halaman Video Link belum dipasang di Postolab.")
-        return 0
-    pages = api.pages()
-    print(f"Pautan menunggu: {len(remote.get('items') or [])} | Postolab: {len(pages)} page")
-    done = run_links(api, remote, pages, settings, int(env("LINK_MAX_PER_RUN", "10") or 10))
+    limit = int(env("LINK_MAX_PER_RUN", "10") or 10)
+    done = []
+    # Setiap pengguna yang dibenarkan (AUTO_REELS_ALLOWED_EMAILS) diproses dengan akaunnya sendiri
+    for email, uapi in user_apis(api):
+        if email:
+            print(f"\n===== Pengguna: {email} =====")
+        try:
+            remote = uapi.link_remote()
+            if remote is None:
+                print("Halaman Video Link belum dipasang di Postolab.")
+                continue
+            if not remote.get("items"):
+                print("Tiada pautan menunggu.")
+                continue
+            pages = uapi.pages()
+        except Exception as e:  # noqa: BLE001
+            print(f"   dilangkau: {e}")
+            continue
+        print(f"Pautan menunggu: {len(remote.get('items') or [])} | Postolab: {len(pages)} page")
+        done += run_links(uapi, remote, pages, settings, limit)
     _summary(done)
     return 0
 

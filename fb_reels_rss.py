@@ -501,18 +501,30 @@ def postolab_sources(fetch=None) -> list[str]:
         return []
     try:
         if fetch is None:
-            from postolab_relay import Postolab
-            fetch = Postolab(env("POSTOLAB_URL", "https://postolab.com").rstrip("/"), env("POSTOLAB_API_KEY")).remote
-        remote = fetch()
+            # Semua pengguna yang dibenarkan (AUTO_REELS_ALLOWED_EMAILS), supaya RSS dijana untuk sumber setiap akaun
+            from postolab_relay import Postolab, user_apis
+            api = Postolab(env("POSTOLAB_URL", "https://postolab.com").rstrip("/"), env("POSTOLAB_API_KEY"))
+            fetches = [u.remote for _, u in user_apis(api)]
+        else:
+            fetches = [fetch]
+        remotes = []
+        for f in fetches:
+            try:
+                remotes.append(f())
+            except Exception as e:  # noqa: BLE001
+                if fetch is not None or len(fetches) == 1:
+                    raise
+                print(f"Satu pengguna dilangkau semasa baca sumber ({e}).")
     except Exception as e:
         print(f"Tidak dapat baca sumber dari Postolab ({e}); guna FB_PAGE_URLS.")
         return []
-    if not remote:
-        return []
     out = []
-    for pc in (remote.get("settings") or {}).get("profiles", {}).values():
-        if pc.get("enabled"):
-            out += [u for u in pc.get("sources") or [] if u not in out]
+    for remote in remotes:
+        if not remote:
+            continue
+        for pc in (remote.get("settings") or {}).get("profiles", {}).values():
+            if pc.get("enabled"):
+                out += [u for u in pc.get("sources") or [] if u not in out]
     return out
 
 
