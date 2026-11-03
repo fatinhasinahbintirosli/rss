@@ -88,15 +88,17 @@ def parse_feed(xml_text: str) -> list[dict]:
     out = []
     for it in root.iter("item"):
         link = it.findtext("link") or ""
-        m = re.search(r"/reel/(\d+)", link)
+        # Reel page (/reel/<id>) atau video group (watch/?v=<id>, /videos/<id>)
+        m = re.search(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})", link)
         enc = it.find("enclosure")
         if not m or enc is None or not enc.get("url"):
             continue
+        rid = next(g for g in m.groups() if g)
         desc = html.unescape(it.findtext("description") or "")
         cm = re.search(r"Kapsyen Penuh:</b><br/>(.*?)</p>", desc, re.S)
         caption = html.unescape(re.sub(r"<[^>]+>", "", (cm.group(1) if cm else "").replace("<br/>", "\n"))).strip()
         tm = re.search(r'<img[^>]+src="([^"]+)"', desc)
-        out.append({"id": m.group(1), "url": link, "mp4": html.unescape(enc.get("url")),
+        out.append({"id": rid, "url": link, "mp4": html.unescape(enc.get("url")),
                     "source": (it.findtext("category") or "").strip().lower(), "caption": caption,
                     "thumb": html.unescape(tm.group(1)) if tm else ""})
     return out
@@ -242,7 +244,7 @@ def render_report(state: dict) -> str:
         out.append(
             f"<tr><td><span style='background:{color.get(st, '#6b7280')};color:#fff;padding:2px 8px;"
             f"border-radius:99px;font-size:12px'>{html.escape(st)}</span></td>"
-            f"<td><a href='https://www.facebook.com/reel/{rid}/'>{rid}</a><br><small>{html.escape(r.get('source', ''))}"
+            f"<td><a href='{html.escape(r.get('url') or f'https://www.facebook.com/reel/{rid}/')}'>{rid}</a><br><small>{html.escape(r.get('source', ''))}"
             f" · {html.escape(r.get('at', '')[:16].replace('T', ' '))}</small></td>"
             f"<td>{html.escape(r.get('summary', ''))}"
             + "".join(f"<div style='color:#555;font-size:13px'>• {html.escape(x)}</div>" for x in r.get("reasons", []))

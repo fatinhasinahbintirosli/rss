@@ -68,7 +68,16 @@ def _numeric_page_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _group_id(url: str) -> str:
+    """ID atau nama group dari facebook.com/groups/<id>/... ('' jika bukan group)."""
+    m = re.search(r"facebook\.com/groups/([^/?#]+)", url or "")
+    return re.sub(r"[^a-zA-Z0-9_.-]", "", m.group(1)) if m else ""
+
+
 def page_slug(url: str) -> str:
+    gid = _group_id(url or "")
+    if gid:                                 # group: "g<id>" supaya tidak bertembung dengan nama page
+        return "g" + re.sub(r"[^a-zA-Z0-9_-]", "", gid)
     pid = _numeric_page_id(url or "")
     if pid:
         return pid
@@ -80,6 +89,9 @@ def normalize_reels_url(raw: str) -> tuple[str, str]:
     url = raw.strip().rstrip("/")
     if not url.startswith("http"):
         url = "https://" + url
+    gid = _group_id(url)
+    if gid:                                 # group awam: tab Media → Videos
+        return f"https://www.facebook.com/groups/{gid}/media/videos", page_slug(url)
     pid = _numeric_page_id(url)
     if pid:
         return f"https://www.facebook.com/profile.php?id={pid}&sk=reels_tab", pid
@@ -119,10 +131,54 @@ def pick_best_mp4(info: dict) -> tuple[str, int | None, int | None]:
 
 
 # ------------------------------------------------------------------ scraping
+# Link video yang dikumpul dari halaman Reels page ATAU tab Media → Videos group
+_VIDEO_LINK = re.compile(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})")
+
+# Tutup popup "See more on Facebook" / log masuk (macam tekan ✕). Pulangkan bilangan yang ditutup.
+_CLOSE_POPUPS_JS = """() => {
+  let n = 0;
+  const sel = 'div[role="dialog"] [aria-label="Close"], div[role="dialog"] [aria-label="Tutup"], [aria-label="Close"][role="button"], [aria-label="Tutup"][role="button"]';
+  document.querySelectorAll(sel).forEach((b) => { try { b.click(); n++; } catch (e) {} });
+  // Sandaran: buang lapisan dialog log masuk yang menghalang klik/scroll
+  document.querySelectorAll('div[role="dialog"]').forEach((d) => {
+    if (/log in|log masuk|see more on facebook|create new account|daftar/i.test(d.innerText || '')) { d.remove(); n++; }
+  });
+  document.documentElement.style.overflow = 'auto'; document.body.style.overflow = 'auto';
+  return n;
+}"""
+
+
+def video_key(url: str) -> str:
+    """ID video dari link reel / watch?v= / videos/<id> ('' jika bukan link video)."""
+    m = _VIDEO_LINK.search(url or "")
+    return next((g for g in m.groups() if g), "") if m else ""
+
+
+def canonical_video_url(url: str) -> str:
+    vid = video_key(url)
+    if not vid:
+        return ""
+    return f"https://www.facebook.com/reel/{vid}/" if "/reel/" in url else f"https://www.facebook.com/watch/?v={vid}"
+
+
+def collect_video_links(hrefs: list[str], max_items: int) -> list[str]:
+    urls, seen = [], set()
+    for u in hrefs:
+        vid = video_key(u)
+        if vid and vid not in seen:
+            seen.add(vid)
+            urls.append(canonical_video_url(u))
+            if len(urls) >= max_items:
+                break
+    return urls
+
+
 def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: str = "") -> tuple[list[str], list[str]]:
-    """Open the Page's reels tab and collect /reel/ links. Returns (urls, blocked_signals)."""
+    """Buka tab Reels page (atau Media → Videos group awam), tutup popup log masuk, scroll, dan kumpul
+    link video. Returns (urls, blocked_signals)."""
     from playwright.sync_api import sync_playwright
 
+    is_group = "/groups/" in page_url
     signals: list[str] = []
     with sync_playwright() as p:
         launch = {"headless": True}
@@ -133,33 +189,39 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
         page = ctx.new_page()
         page.goto(page_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
-        page.keyboard.press("Escape")
-        for _ in range(3):
+        closed = 0
+        links: list[str] = []
+        for i in range(8 if is_group else 3):
+            page.keyboard.press("Escape")
+            try:
+                closed += page.evaluate(_CLOSE_POPUPS_JS) or 0
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(800)
             page.evaluate("window.scrollBy(0, 1500)")
             page.wait_for_timeout(1500)
-        links = page.evaluate("""() => Array.from(document.querySelectorAll('a[href*="/reel/"]'))
-                                         .map(a => a.href.split('?')[0])""")
-        body = page.inner_text("body")[:5000] if not links else ""
-        if not links:
+            links = page.evaluate("""() => Array.from(document.querySelectorAll(
+                'a[href*="/reel/"], a[href*="/videos/"], a[href*="watch/?v="], a[href*="video.php?v="]'))
+                .map(a => a.href)""")
+            if len(collect_video_links(links, max_items)) >= max_items:
+                break
+        if closed:
+            signals.append(f"popup log masuk ditutup ({closed}x)")
+        urls = collect_video_links(links, max_items)
+        if not urls:
+            body = page.inner_text("body")[:5000]
             if LOGIN_WALL.search(body):
                 signals.append("Halaman minta log masuk (login wall)")
             if re.search(r"facebook\.com/(login|checkpoint)", page.url):
                 signals.append(f"Dialih ke {page.url}")
+            if re.search(r"(private group|kumpulan peribadi|join group to see|sertai kumpulan)", body, re.I):
+                signals.append("Group ini peribadi / perlu jadi ahli")
             if debug_dir:
                 os.makedirs(debug_dir, exist_ok=True)
                 page.screenshot(path=os.path.join(debug_dir, "reels_page.png"), full_page=False)
                 with open(os.path.join(debug_dir, "reels_page.html"), "w", encoding="utf-8") as f:
                     f.write(page.content())
         browser.close()
-
-    urls, seen = [], set()
-    for u in links:
-        m = re.search(r"/reel/(\d+)", u)
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            urls.append(f"https://www.facebook.com/reel/{m.group(1)}/")
-            if len(urls) >= max_items:
-                break
     return urls, signals
 
 
@@ -183,7 +245,7 @@ def is_parse_error(msg: str) -> bool:
 def extract_reel(reel_url: str, proxy: str = "", cookiefile: str = "") -> Reel:
     import yt_dlp
 
-    rid = re.search(r"/reel/(\d+)", reel_url).group(1)
+    rid = video_key(reel_url) or re.sub(r"\W", "", reel_url)[-20:]
     reel = Reel(id=rid, url=reel_url)
     opts = {"quiet": True, "no_warnings": True, "skip_download": True, "user_agent": UA}
     if proxy:
