@@ -270,6 +270,28 @@ def download(url: str, dest: str, session=None) -> None:
                 f.write(chunk)
 
 
+def download_reel(item: dict, dest: str, log=print, extract=None) -> None:
+    """Muat turun video reel dari RSS. Pautan mp4 Facebook LUPUT selepas beberapa jam (403/410), jadi
+    reel lama dalam RSS (cth. untuk pengguna atau page yang baru) akan gagal. Jika begitu, ambil semula
+    pautan mp4 yang baharu dari pautan reel itu sendiri, kemudian cuba lagi."""
+    try:
+        download(item["mp4"], dest)
+        return
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", 0)
+        if code not in (403, 404, 410) or not item.get("url"):
+            raise
+        log(f"   pautan mp4 lama luput ({code}); ambil pautan baharu dari {item['url']}")
+    if extract is None:
+        import fb_reels_rss as fbr
+        extract = lambda url: fbr.extract_reel(url, env("PROXY_URL"), env("COOKIES_FILE"))  # noqa: E731
+    fresh = extract(item["url"])
+    if not getattr(fresh, "mp4", ""):
+        raise RuntimeError(f"Pautan video sudah luput dan tidak dapat diambil semula ({getattr(fresh, 'error', '')[:150]})")
+    download(fresh.mp4, dest)
+    item["mp4"] = fresh.mp4
+
+
 # Tidak boleh dilepaskan walaupun melalui APPROVE_IDS
 NEVER_POST = {"visual_nudity_sexual", "visual_minor_safety", "visual_graphic_violence", "visual_self_harm",
               "visual_drugs", "text_adult_sexual", "text_self_harm", "text_drugs"}
@@ -317,7 +339,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
 
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, f"{item['id']}.mp4")
-        download(item["mp4"], path)
+        download_reel(item, path, log)
         # Caption asal TIDAK dipost (diganti caption baru yang disemak berasingan), jadi semak video sahaja.
         # Reel yang sama untuk beberapa profile: semak sekali sahaja dalam satu larian.
         if cache is not None and item["id"] in cache:
