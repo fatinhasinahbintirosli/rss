@@ -670,7 +670,11 @@ def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], st
     archive_key = f"{cfg['prefix']}{slug}.archive.json"
     wants_archive = slug in cfg.get("backfill_slugs", set()) and client is not None
     archive = r2_get_obj(client, cfg["bucket"], archive_key) if wants_archive else {}
-    deep = wants_archive and _hours_since(archive.get("deep_at", "")) >= cfg.get("archive_every_h", 12)
+    has_cookies = bool(cfg.get("cookiefile"))
+    # Scroll dalam: ikut jadual (setiap N jam), ATAU serta-merta jika cookies baru ditambah dan arkib ini belum
+    # pernah dibina dengan log masuk (tanpa log masuk Facebook hanya beri ~10 video).
+    deep = wants_archive and (_hours_since(archive.get("deep_at", "")) >= cfg.get("archive_every_h", 12)
+                              or (has_cookies and not archive.get("deep_cookies")))
     try:
         if deep:
             print(f"      arkib: scroll dalam (maks {cfg.get('archive_scrolls', 40)} kali) untuk kumpul video lama")
@@ -684,6 +688,7 @@ def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], st
     if wants_archive and all_urls:
         items = merge_archive(all_urls, archive.get("items") or [])
         data = {"deep_at": dt.datetime.now(dt.timezone.utc).isoformat() if deep else archive.get("deep_at", ""),
+                "deep_cookies": bool(archive.get("deep_cookies")) or (deep and has_cookies),
                 "items": items}
         r2_put(client, cfg["bucket"], archive_key, json.dumps(data, ensure_ascii=False).encode(), "application/json")
         print(f"      arkib: {len(items)} video (terbaru → paling lama)")
