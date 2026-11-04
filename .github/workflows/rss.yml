@@ -47,7 +47,7 @@ jobs:
           FB_PAGE_URLS: ${{ vars.FB_PAGE_URLS || 'https://www.facebook.com/penmerahdotcoms/reels/,https://www.facebook.com/buletinmalaysiakuu/reels/' }}
           MAX_REELS: ${{ vars.MAX_REELS || '10' }}
           ARCHIVE_SCROLLS: ${{ vars.ARCHIVE_SCROLLS || '30' }}     # kedalaman scroll arkib video lama
-          ARCHIVE_EVERY_H: ${{ vars.ARCHIVE_EVERY_H || '12' }}     # scroll dalam setiap N jam
+          ARCHIVE_EVERY_H: '12'          # scroll dalam setiap 12 jam (cookies baru → terus scroll dalam sekali)
           KEEP_ITEMS: ${{ vars.KEEP_ITEMS || '30' }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
