@@ -12,6 +12,7 @@ Larian (GitHub Actions, selepas RSS dijana):
 from __future__ import annotations
 
 import copy
+from itertools import zip_longest
 import datetime as dt
 import re
 import html
@@ -274,14 +275,17 @@ def download_reel(item: dict, dest: str, log=print, extract=None) -> None:
     """Muat turun video reel dari RSS. Pautan mp4 Facebook LUPUT selepas beberapa jam (403/410), jadi
     reel lama dalam RSS (cth. untuk pengguna atau page yang baru) akan gagal. Jika begitu, ambil semula
     pautan mp4 yang baharu dari pautan reel itu sendiri, kemudian cuba lagi."""
-    try:
-        download(item["mp4"], dest)
-        return
-    except requests.HTTPError as e:
-        code = getattr(e.response, "status_code", 0)
-        if code not in (403, 404, 410) or not item.get("url"):
-            raise
-        log(f"   pautan mp4 lama luput ({code}); ambil pautan baharu dari {item['url']}")
+    if item.get("mp4"):
+        try:
+            download(item["mp4"], dest)
+            return
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", 0)
+            if code not in (403, 404, 410) or not item.get("url"):
+                raise
+            log(f"   pautan mp4 lama luput ({code}); ambil pautan baharu dari {item['url']}")
+    elif not item.get("url"):
+        raise RuntimeError("Tiada pautan video.")
     if extract is None:
         extract = _fresh_reel
     fresh = extract(item["url"])
@@ -289,6 +293,10 @@ def download_reel(item: dict, dest: str, log=print, extract=None) -> None:
         raise RuntimeError(f"Pautan video sudah luput dan tidak dapat diambil semula ({getattr(fresh, 'error', '')[:150]})")
     download(fresh.mp4, dest)
     item["mp4"] = fresh.mp4
+    if not item.get("caption") and getattr(fresh, "caption", ""):
+        item["caption"] = fresh.caption          # video lama dari arkib: caption asal sebagai konteks
+    if not item.get("thumb") and getattr(fresh, "thumb", ""):
+        item["thumb"] = fresh.thumb
 
 
 def _fresh_reel(url: str):
@@ -426,7 +434,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             return rec
         video_url = api.upload(path)
 
-    res = api.schedule(video_url, item["id"], posts, cfg.profile, cfg.stagger, cfg.slots,
+    res = api.schedule(video_url, item.get("sid") or item["id"], posts, cfg.profile, cfg.stagger, cfg.slots,
                        first_comment=cfg.comment_text, comment_image_url=comment_img)
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
@@ -488,6 +496,9 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
     c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
                     if pc.get("target_mode") == "selected" else None)
     c.sources = {source_slug(u) for u in pc.get("sources") or []} - {""}
+    c.backfill = pc.get("backfill") is True
+    c.backfill_per_run = max(1, min(10, int(pc.get("backfill_per_run") or 2)))
+    c.backfill_rotate_days = max(7, min(365, int(pc.get("backfill_rotate_days") or 30)))
     c.approve_ids = {rid for (prof, rid), row in rows.items() if prof == name and row.get("status") == "approved"}
     return c
 
@@ -505,6 +516,60 @@ def remote_eligible(row: dict | None, dry_run: bool) -> bool:
     if st == "error":
         return int(row.get("tries") or 0) < 3
     return False
+
+
+def _age_days(iso: str) -> float:
+    try:
+        when = dt.datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        return (dt.datetime.now(dt.timezone.utc) - when).total_seconds() / 86400
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def load_archives(slugs: set[str], fetch=None) -> dict[str, list[dict]]:
+    """{slug: [{id, url}, ...]} terbaru → paling lama (dari R2, ditulis oleh langkah RSS)."""
+    out = {}
+    if fetch is None:
+        client, bucket, prefix = (r2() if env("R2_BUCKET") else None), env("R2_BUCKET"), env("R2_PREFIX", "rss/")
+
+        def fetch(slug):
+            if client is None:
+                return {}
+            try:
+                return json.loads(client.get_object(Bucket=bucket, Key=f"{prefix}{slug}.archive.json")["Body"].read())
+            except Exception:  # noqa: BLE001
+                return {}
+    for slug in slugs:
+        data = fetch(slug) or {}
+        out[slug] = [it for it in data.get("items") or [] if it.get("id") and it.get("url")]
+    return out
+
+
+def plan_backfill(c: Cfg, archives: dict[str, list[dict]], rows: dict, skip_ids: set, today: str) -> list[dict]:
+    """Video LAMA untuk satu profile: paling lama dahulu, yang belum pernah diambil. Bila semua sudah diambil,
+    mula semula dari yang paling lama — hanya video yang kali terakhir diambil lebih dari backfill_rotate_days."""
+    fresh, rotate = [], []
+    # Gilir antara sumber supaya setiap sumber dapat giliran; setiap senarai diterbalikkan (paling lama dahulu)
+    lists = [list(reversed(archives.get(slug) or [])) for slug in sorted(c.sources)]
+    slug_of = {it["id"]: slug for slug in c.sources for it in archives.get(slug) or []}
+    order = [it for group in zip_longest(*lists) for it in group if it]
+    for it in order:
+        if it["id"] in skip_ids:
+            continue
+        row = rows.get((c.profile, it["id"]))
+        st = (row or {}).get("status")
+        if row is None or (st == "error" and int(row.get("tries") or 0) < 3):
+            fresh.append(it)
+        elif st == "posted" and _age_days(row.get("updated_at")) >= c.backfill_rotate_days:
+            rotate.append(it)
+    picked = (fresh or rotate)[:c.backfill_per_run]
+    out = []
+    for it in picked:
+        again = it not in fresh
+        out.append({"id": it["id"], "url": it["url"], "mp4": "", "source": slug_of.get(it["id"], ""), "caption": "",
+                    "thumb": "", "backfill": True, "rotate": again,
+                    "sid": f"{it['id']}:r{today}" if again else it["id"]})
+    return out
 
 
 def plan_jobs(feed: list[dict], cfgs: list[Cfg], rows: dict, limit: int) -> list[tuple[Cfg, dict]]:
@@ -565,8 +630,20 @@ def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed:
     state = {"captions": [cap.clean_body(x, suffixes) for x in remote.get("captions") or []]}
     cache, done = {}, []
     jobs = plan_jobs(feed, cfgs, rows, int(gl.get("max_videos_per_run") or base.max_per_run))
+    # Tiada video baru untuk profile yang hidupkan "ambil video lama" → ambil dari arkib (paling lama dahulu)
+    idle = [c for c in cfgs if c.backfill and not any(jc is c for jc, _ in jobs)]
+    if idle:
+        archives = load_archives(set().union(*(c.sources for c in idle)))
+        feed_ids = {it["id"] for it in feed}
+        today = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
+        for c in idle:
+            old = plan_backfill(c, archives, rows, feed_ids, today)
+            total = sum(len(archives.get(s) or []) for s in c.sources)
+            print(f"Profile '{c.profile}': tiada video baru → {len(old)} video lama dari arkib ({total} video dalam arkib)")
+            jobs += [(c, it) for it in old]
     for i, (c, item) in enumerate(jobs, 1):
-        print(f"[{i}/{len(jobs)}] {item['id']} ({item['source']}) → profile '{c.profile}'")
+        tag = " [video lama, ulangan]" if item.get("rotate") else " [video lama]" if item.get("backfill") else ""
+        print(f"[{i}/{len(jobs)}] {item['id']} ({item['source']}) → profile '{c.profile}'{tag}")
         prev = rows.get((c.profile, item["id"])) or {}
         try:
             rec = process(item, pages, c, settings, state, api, cache=cache)

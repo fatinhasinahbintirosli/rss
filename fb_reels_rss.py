@@ -173,9 +173,11 @@ def collect_video_links(hrefs: list[str], max_items: int) -> list[str]:
     return urls
 
 
-def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: str = "") -> tuple[list[str], list[str]]:
+def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: str = "",
+                   scrolls: int | None = None) -> tuple[list[str], list[str]]:
     """Buka tab Reels page (atau Media → Videos group awam), tutup popup log masuk, scroll, dan kumpul
-    link video. Returns (urls, blocked_signals)."""
+    link video (terbaru dahulu). scrolls = bilangan scroll maksimum (lebih banyak = video lebih lama).
+    Returns (urls, blocked_signals)."""
     from playwright.sync_api import sync_playwright
 
     is_group = "/groups/" in page_url
@@ -191,7 +193,8 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
         page.wait_for_timeout(4000)
         closed = 0
         links: list[str] = []
-        for i in range(8 if is_group else 3):
+        last_count, still = 0, 0
+        for i in range(scrolls or (8 if is_group else 3)):
             page.keyboard.press("Escape")
             try:
                 closed += page.evaluate(_CLOSE_POPUPS_JS) or 0
@@ -203,7 +206,12 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
             links = page.evaluate("""() => Array.from(document.querySelectorAll(
                 'a[href*="/reel/"], a[href*="/videos/"], a[href*="watch/?v="], a[href*="video.php?v="]'))
                 .map(a => a.href)""")
-            if len(collect_video_links(links, max_items)) >= max_items:
+            found = len(collect_video_links(links, max_items))
+            if found >= max_items:
+                break
+            still = still + 1 if found == last_count else 0      # tiada video baru dimuatkan → hujung halaman
+            last_count = found
+            if scrolls and still >= 4:
                 break
         if closed:
             signals.append(f"popup log masuk ditutup ({closed}x)")
@@ -557,6 +565,9 @@ def r2_put(client, bucket: str, key: str, body: bytes, content_type: str) -> Non
 DEFAULT_PAGES = "https://www.facebook.com/penmerahdotcoms/reels/,https://www.facebook.com/buletinmalaysiakuu/reels/"
 
 
+BACKFILL_SOURCES: set[str] = set()     # sumber yang ada profile dengan "ambil video lama" dihidupkan
+
+
 def postolab_sources(fetch=None) -> list[str]:
     """Gabungan sumber RSS semua profile yang aktif di halaman Auto Reels (Postolab). [] jika tiada/ralat."""
     if not env("POSTOLAB_API_KEY"):
@@ -587,6 +598,8 @@ def postolab_sources(fetch=None) -> list[str]:
         for pc in (remote.get("settings") or {}).get("profiles", {}).values():
             if pc.get("enabled"):
                 out += [u for u in pc.get("sources") or [] if u not in out]
+                if pc.get("backfill") is True:
+                    BACKFILL_SOURCES.update(pc.get("sources") or [])
     return out
 
 
@@ -600,15 +613,69 @@ def page_list(fetch=None) -> list[str]:
     return [u.strip() for u in re.split(r"[,\n]", raw) if u.strip()]
 
 
+# ------------------------------------------------------------------ arkib video (untuk "ambil video lama")
+# <prefix><slug>.archive.json = {"deep_at": ISO, "items": [{"id", "url"}, ...]} — TERBARU dahulu, PALING LAMA di hujung.
+# Relay Auto Reels guna arkib ini bila tiada video baru (bermula dari hujung senarai = paling lama).
+ARCHIVE_MAX = 1000
+
+
+def merge_archive(top: list[str], previous: list[dict], limit: int = ARCHIVE_MAX) -> list[dict]:
+    """top = link dari larian ini (terbaru → lama). Item lama arkib yang tiada dalam top kekal di belakang."""
+    out, seen = [], set()
+    for u in top:
+        vid = video_key(u)
+        if vid and vid not in seen:
+            seen.add(vid)
+            out.append({"id": vid, "url": canonical_video_url(u)})
+    for it in previous or []:
+        if it.get("id") and it["id"] not in seen:
+            seen.add(it["id"])
+            out.append({"id": it["id"], "url": it.get("url") or ""})
+    return out[:limit]
+
+
+def _hours_since(iso: str) -> float:
+    try:
+        return (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(iso)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return 1e9
+
+
+def r2_get_obj(client, bucket: str, key: str) -> dict:
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read())
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], str]:
     page_url, slug = normalize_reels_url(raw_url)
     debug_dir = os.path.join(cfg["debug_dir"], slug)
     rep = RunReport(page_url=page_url, started=dt.datetime.now(dt.timezone.utc).isoformat())
     print(f"\n=== {slug} ===\n[1/3] Buka {page_url}")
+    # Sumber yang diaktifkan "ambil video lama": scroll lebih dalam (sekali-sekala) untuk isi arkib
+    archive_key = f"{cfg['prefix']}{slug}.archive.json"
+    wants_archive = slug in cfg.get("backfill_slugs", set()) and client is not None
+    archive = r2_get_obj(client, cfg["bucket"], archive_key) if wants_archive else {}
+    deep = wants_archive and _hours_since(archive.get("deep_at", "")) >= cfg.get("archive_every_h", 12)
     try:
-        urls, signals = list_reel_urls(page_url, cfg["max_items"], cfg["proxy"], debug_dir)
+        if deep:
+            print(f"      arkib: scroll dalam (maks {cfg.get('archive_scrolls', 40)} kali) untuk kumpul video lama")
+            all_urls, signals = list_reel_urls(page_url, ARCHIVE_MAX, cfg["proxy"], debug_dir,
+                                               scrolls=cfg.get("archive_scrolls", 40))
+        else:
+            all_urls, signals = list_reel_urls(page_url, cfg["max_items"], cfg["proxy"], debug_dir)
     except Exception as e:
-        urls, signals = [], [f"Playwright gagal: {e}"[:300]]
+        all_urls, signals = [], [f"Playwright gagal: {e}"[:300]]
+    urls = all_urls[:cfg["max_items"]]
+    if wants_archive and all_urls:
+        items = merge_archive(all_urls, archive.get("items") or [])
+        data = {"deep_at": dt.datetime.now(dt.timezone.utc).isoformat() if deep else archive.get("deep_at", ""),
+                "items": items}
+        r2_put(client, cfg["bucket"], archive_key, json.dumps(data, ensure_ascii=False).encode(), "application/json")
+        print(f"      arkib: {len(items)} video (terbaru → paling lama)")
     rep.reel_links_found, rep.blocked_signals = len(urls), signals
     print(f"      {len(urls)} pautan reel dijumpai" + (f" | {'; '.join(signals)}" if signals else ""))
 
@@ -677,12 +744,16 @@ def run() -> int:
         "bucket": env("R2_BUCKET"),
         "prefix": env("R2_PREFIX", "rss/"),
         "public_base": env("R2_PUBLIC_BASE_URL").rstrip("/"),
+        "archive_scrolls": int(env("ARCHIVE_SCROLLS", "40") or 40),
+        "archive_every_h": float(env("ARCHIVE_EVERY_H", "12") or 12),
     }
     client = r2_client() if cfg["bucket"] else None
 
     reports: list[RunReport] = []
     combined: list[Reel] = []
-    for url in page_list():
+    sources = page_list()
+    cfg["backfill_slugs"] = {normalize_reels_url(u)[1] for u in BACKFILL_SOURCES}
+    for url in sources:
         rep, items, slug = run_page(url, client, cfg)
         reports.append(rep)
         combined.extend(items)
