@@ -545,7 +545,8 @@ def load_archives(slugs: set[str], fetch=None) -> dict[str, list[dict]]:
     return out
 
 
-def plan_backfill(c: Cfg, archives: dict[str, list[dict]], rows: dict, skip_ids: set, today: str) -> list[dict]:
+def plan_backfill(c: Cfg, archives: dict[str, list[dict]], rows: dict, skip_ids: set, today: str,
+                  want: int | None = None) -> list[dict]:
     """Video LAMA untuk satu profile: paling lama dahulu, yang belum pernah diambil. Bila semua sudah diambil,
     mula semula dari yang paling lama — hanya video yang kali terakhir diambil lebih dari backfill_rotate_days."""
     fresh, rotate = [], []
@@ -562,7 +563,7 @@ def plan_backfill(c: Cfg, archives: dict[str, list[dict]], rows: dict, skip_ids:
             fresh.append(it)
         elif st == "posted" and _age_days(row.get("updated_at")) >= c.backfill_rotate_days:
             rotate.append(it)
-    picked = (fresh or rotate)[:c.backfill_per_run]
+    picked = (fresh + rotate)[:c.backfill_per_run if want is None else max(0, want)]
     out = []
     for it in picked:
         again = it not in fresh
@@ -630,16 +631,20 @@ def run_remote(base: Cfg, settings: Settings, api: Postolab, remote: dict, feed:
     state = {"captions": [cap.clean_body(x, suffixes) for x in remote.get("captions") or []]}
     cache, done = {}, []
     jobs = plan_jobs(feed, cfgs, rows, int(gl.get("max_videos_per_run") or base.max_per_run))
-    # Tiada video baru untuk profile yang hidupkan "ambil video lama" → ambil dari arkib (paling lama dahulu)
-    idle = [c for c in cfgs if c.backfill and not any(jc is c for jc, _ in jobs)]
-    if idle:
-        archives = load_archives(set().union(*(c.sources for c in idle)))
+    # "Ambil video lama": video baru dahulu; jika kurang dari bilangan yang ditetapkan, tambah video lama dari
+    # arkib (paling lama dahulu) sehingga cukup — supaya Queue sentiasa terisi.
+    short = [(c, c.backfill_per_run - sum(1 for jc, _ in jobs if jc is c)) for c in cfgs if c.backfill]
+    short = [(c, n) for c, n in short if n > 0]
+    if short:
+        archives = load_archives(set().union(*(c.sources for c, _ in short)))
         feed_ids = {it["id"] for it in feed}
         today = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-        for c in idle:
-            old = plan_backfill(c, archives, rows, feed_ids, today)
+        for c, need in short:
+            old = plan_backfill(c, archives, rows, feed_ids, today, want=need)
             total = sum(len(archives.get(s) or []) for s in c.sources)
-            print(f"Profile '{c.profile}': tiada video baru → {len(old)} video lama dari arkib ({total} video dalam arkib)")
+            new = c.backfill_per_run - need
+            print(f"Profile '{c.profile}': {new} video baru → tambah {len(old)} video lama dari arkib "
+                  f"({total} video dalam arkib)")
             jobs += [(c, it) for it in old]
     for i, (c, item) in enumerate(jobs, 1):
         tag = " [video lama, ulangan]" if item.get("rotate") else " [video lama]" if item.get("backfill") else ""

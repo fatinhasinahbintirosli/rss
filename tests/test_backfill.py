@@ -78,3 +78,19 @@ def test_run_remote_adds_backfill_when_no_new(monkeypatch):
     monkeypatch.setattr(relay, "load_archives", lambda slugs, fetch=None: {s: ARCH["g1"] for s in slugs})
     relay.run_remote(relay.Cfg(), None, api, remote, [], [{"page_id": "p", "page_name": "P"}], process=process)
     assert seen == [("1", True), ("2", True)]
+
+
+def test_tops_up_when_few_new(monkeypatch):
+    seen = []
+
+    def process(item, pages, c, settings, state, api, cache=None):
+        seen.append((item["id"], bool(item.get("backfill"))))
+        return {"status": "posted", "summary": "", "scheduled": []}
+    monkeypatch.setattr(relay, "load_archives", lambda slugs, fetch=None: {s: ARCH["g1"] for s in slugs})
+    api = types.SimpleNamespace(save_items=lambda items: None)
+    feed = [{"id": "99", "url": "u", "mp4": "m", "source": "g1", "caption": ""}]
+    remote = {"settings": {"dry_run": False, "profiles": {"deli": {"enabled": True, "sources": ["https://www.facebook.com/groups/1/"],
+                                                                    "backfill": True, "backfill_per_run": 3}}},
+              "items": [], "captions": []}
+    relay.run_remote(relay.Cfg(), None, api, remote, feed, [{"page_id": "p", "page_name": "P"}], process=process)
+    assert seen == [("99", False), ("1", True), ("2", True)]
