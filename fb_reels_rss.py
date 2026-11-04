@@ -174,7 +174,7 @@ def collect_video_links(hrefs: list[str], max_items: int) -> list[str]:
 
 
 def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: str = "",
-                   scrolls: int | None = None) -> tuple[list[str], list[str]]:
+                   scrolls: int | None = None, cookiefile: str = "") -> tuple[list[str], list[str]]:
     """Buka tab Reels page (atau Media → Videos group awam), tutup popup log masuk, scroll, dan kumpul
     link video (terbaru dahulu). scrolls = bilangan scroll maksimum (lebih banyak = video lebih lama).
     Returns (urls, blocked_signals)."""
@@ -188,6 +188,15 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
             launch["proxy"] = {"server": proxy}
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
+        # Tanpa log masuk, Facebook hanya tunjuk ~10 video pertama. Dengan cookies (FB_COOKIES), scroll boleh
+        # pergi lebih jauh untuk arkib video lama.
+        ck = [c for c in _netscape_cookies(cookiefile) if "facebook" in c.get("domain", "")] if cookiefile else []
+        if ck:
+            try:
+                ctx.add_cookies(ck)
+                signals.append(f"log masuk guna cookies ({len(ck)})")
+            except Exception as e:  # noqa: BLE001
+                signals.append(f"cookies tidak dapat dimuat: {e}"[:120])
         page = ctx.new_page()
         page.goto(page_url, wait_until="domcontentloaded", timeout=60000)
         page.wait_for_timeout(4000)
@@ -201,8 +210,10 @@ def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: st
             except Exception:  # noqa: BLE001
                 pass
             page.wait_for_timeout(800)
+            page.mouse.move(640, 600)
+            page.mouse.wheel(0, 2500)               # scroll sebenar (beri isyarat kepada Facebook untuk muat lagi)
             page.evaluate("window.scrollBy(0, 1500)")
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(1800 if scrolls else 1500)
             links = page.evaluate("""() => Array.from(document.querySelectorAll(
                 'a[href*="/reel/"], a[href*="/videos/"], a[href*="watch/?v="], a[href*="video.php?v="]'))
                 .map(a => a.href)""")
@@ -664,7 +675,7 @@ def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], st
         if deep:
             print(f"      arkib: scroll dalam (maks {cfg.get('archive_scrolls', 40)} kali) untuk kumpul video lama")
             all_urls, signals = list_reel_urls(page_url, ARCHIVE_MAX, cfg["proxy"], debug_dir,
-                                               scrolls=cfg.get("archive_scrolls", 40))
+                                               scrolls=cfg.get("archive_scrolls", 40), cookiefile=cfg["cookiefile"])
         else:
             all_urls, signals = list_reel_urls(page_url, cfg["max_items"], cfg["proxy"], debug_dir)
     except Exception as e:
