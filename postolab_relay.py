@@ -283,13 +283,27 @@ def download_reel(item: dict, dest: str, log=print, extract=None) -> None:
             raise
         log(f"   pautan mp4 lama luput ({code}); ambil pautan baharu dari {item['url']}")
     if extract is None:
-        import fb_reels_rss as fbr
-        extract = lambda url: fbr.extract_reel(url, env("PROXY_URL"), env("COOKIES_FILE"))  # noqa: E731
+        extract = _fresh_reel
     fresh = extract(item["url"])
     if not getattr(fresh, "mp4", ""):
         raise RuntimeError(f"Pautan video sudah luput dan tidak dapat diambil semula ({getattr(fresh, 'error', '')[:150]})")
     download(fresh.mp4, dest)
     item["mp4"] = fresh.mp4
+
+
+def _fresh_reel(url: str):
+    """Pautan mp4 baharu untuk satu reel: yt-dlp dahulu, kemudian pelayar Chromium (sama seperti langkah RSS)."""
+    import fb_reels_rss as fbr
+    reel = fbr.extract_reel(url, env("PROXY_URL"), env("COOKIES_FILE"))
+    if reel.mp4:
+        return reel
+    try:
+        from link_relay import ensure_chromium        # pasang Chromium hanya bila perlu
+        ensure_chromium()
+        fbr.browser_fill([reel], env("PROXY_URL"), env("COOKIES_FILE"))
+    except Exception as e:  # noqa: BLE001
+        reel.error = f"{reel.error} | pelayar: {e}"[:300]
+    return reel
 
 
 # Tidak boleh dilepaskan walaupun melalui APPROVE_IDS
