@@ -548,6 +548,9 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         video_url = api.upload(v["path"])
 
     slots, stagger = slots_for(pc)
+    if (item.get("schedule_mode") or "") == "next":
+        # Queue Next: slot Time Slots paling awal; Postolab tolak queue sedia ada satu slot ke belakang
+        slots, stagger = {"source": "profile", "mode": "next"}, 0
     names = {str(p["page_id"]): p["page_name"] for p in pages}
     msg = {p["pageId"]: p["message"] for p in posts}
     created, skipped = [], []

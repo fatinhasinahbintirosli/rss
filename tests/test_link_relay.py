@@ -287,3 +287,17 @@ class TestLinkRelay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQueueNext(unittest.TestCase):
+    def test_next_mode_sends_queue_next_slots(self):
+        settings = Settings()
+        settings.gemini_api_key = "x"
+        api = FakeApi()
+        rec = lr.process_link({"id": "n1", "profile": "deli", "url": "u", "schedule_mode": "next"}, {}, PAGES[:2],
+                              settings, [], api, fetcher=fetcher(),
+                              ask_factory=asker(["Katanya kejadian ni bermula bila", "Dpt info dorg ni rupanya"]),
+                              log=lambda m: None)
+        self.assertEqual(rec["status"], "posted", rec)
+        c = api.calls[0]
+        self.assertEqual((c["slots"], c["stagger"], c["when"]), ({"source": "profile", "mode": "next"}, 0, None))
