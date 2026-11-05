@@ -44,6 +44,20 @@ class LinkApi(Postolab):
         self._check(self.s.post(f"{self.base}/api/external/link-videos", headers=self.h, timeout=30,
                                 json={"items": items}))
 
+    # "Import video from link" di Create Post (Scheduler): muat turun sahaja, TANPA AI
+    def imports_remote(self) -> list[dict] | None:
+        """None jika Postolab belum ada /api/external/video-fetch."""
+        r = self.s.get(f"{self.base}/api/external/video-fetch", headers={"Authorization": self.h["Authorization"]},
+                       timeout=30)
+        if r.status_code == 404:
+            return None
+        return self._check(r).get("items") or []
+
+    def save_import(self, item_id: str, **fields) -> None:
+        self._check(self.s.post(f"{self.base}/api/external/video-fetch",
+                                headers={"Authorization": self.h["Authorization"]}, timeout=30,
+                                json={"id": item_id, **fields}))
+
 
 # ------------------------------------------------------------------ muat turun
 class DownloadError(RuntimeError):
@@ -576,6 +590,53 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
     return rec
 
 
+# ------------------------------------------------------------------ Import video (Scheduler)
+def process_import(item: dict, api, fetcher=None, log=print) -> dict:
+    """Muat turun satu video dan simpan dalam R2. Tiada caption / AI."""
+    fetcher = fetcher or fetch_video
+    with tempfile.TemporaryDirectory() as td:
+        v = fetcher(item["url"], td, int(env("IMPORT_MAX_MINUTES", env("LINK_MAX_MINUTES", "15")) or 15),
+                    env("COOKIES_FILE"), env("PROXY_URL"))
+        thumb = None
+        try:
+            thumb = api.upload(screenshot(v["path"], v.get("duration") or 0), "image/jpeg")
+        except Exception as e:  # noqa: BLE001 — gambar kecil tidak wajib
+            log(f"   thumbnail dilangkau: {str(e)[:120]}")
+        video_url = api.upload(v["path"])
+    return {"status": "done", "video_url": video_url, "thumb_url": thumb,
+            "title": (v.get("title") or "")[:500], "description": (v.get("description") or "")[:5000]}
+
+
+def run_imports(api, fetcher=None, log=print) -> int:
+    try:
+        items = api.imports_remote()
+    except Exception as e:  # noqa: BLE001
+        log(f"Import video: dilangkau ({e})")
+        return 0
+    if not items:
+        log("Import video: tiada yang menunggu." if items is not None else "Import video: belum dipasang di Postolab.")
+        return 0
+    log(f"Import video (Create Post): {len(items)} menunggu")
+    for i, item in enumerate(items, 1):
+        log(f"[import {i}/{len(items)}] {item['url']}")
+        try:
+            api.save_import(item["id"], status="processing")
+        except Exception as e:  # noqa: BLE001
+            log(f"   gagal kemas kini status: {e}")
+        try:
+            rec = process_import(item, api, fetcher, log)
+            log(f"   SIAP → {rec['video_url']}")
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            rec = {"status": "error", "error": (_friendly(msg) or msg)[:500]}
+            log(f"   RALAT: {rec['error']}")
+        try:
+            api.save_import(item["id"], **rec)
+        except Exception as e:  # noqa: BLE001
+            log(f"   gagal simpan keputusan: {e}")
+    return len(items)
+
+
 # ------------------------------------------------------------------ main
 def run_links(api, remote: dict, pages: list[dict], settings: Settings, limit: int,
               process=process_link, log=print) -> list[tuple[dict, dict]]:
@@ -617,11 +678,16 @@ def run_links(api, remote: dict, pages: list[dict], settings: Settings, limit: i
 def run() -> int:
     settings = Settings()
     key = env("POSTOLAB_API_KEY")
-    if not key or not settings.gemini_api_key:
-        print("POSTOLAB_API_KEY / GEMINI_API_KEY belum diset.", file=sys.stderr)
+    if not key:
+        print("POSTOLAB_API_KEY belum diset.", file=sys.stderr)
         return 2
-    settings.visual_provider = "gemini"
     api = LinkApi(env("POSTOLAB_URL", "https://postolab.com").rstrip("/"), key)
+    # Import video dari Create Post dahulu (cepat, pengguna sedang menunggu di skrin)
+    run_imports(api)
+    if not settings.gemini_api_key:
+        print("GEMINI_API_KEY belum diset — Video Link dilangkau.", file=sys.stderr)
+        return 0
+    settings.visual_provider = "gemini"
     limit = int(env("LINK_MAX_PER_RUN", "10") or 10)
     done = []
     # Setiap pengguna yang dibenarkan (AUTO_REELS_ALLOWED_EMAILS) diproses dengan akaunnya sendiri
