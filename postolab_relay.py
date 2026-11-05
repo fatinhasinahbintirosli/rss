@@ -41,6 +41,10 @@ def env(name: str, default: str = "") -> str:
 
 
 # ------------------------------------------------------------------ config
+# Kategori yang SENTIASA disekat (merah), walaupun Gemini laporkan sebagai amaran sahaja
+DEFAULT_FORCE_BLOCK = ("visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing,"
+                       "visual_child_abuse,visual_weapons,text_severe_profanity,visual_blood,visual_animal_abuse")
+
 class Cfg:
     def __init__(self):
         self.rss_url = env("RELAY_RSS_URL") or (
@@ -66,7 +70,7 @@ class Cfg:
         self.approve_ids = {x.strip() for x in env("APPROVE_IDS").replace("\n", ",").split(",") if x.strip()}
         # Sentiasa MERAH walaupun Gemini beri tahap "warn": darah, kematian, cedera parah, bunuh diri.
         self.force_block = {x.strip() for x in env(
-            "FORCE_BLOCK", "visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing").split(",")
+            "FORCE_BLOCK", DEFAULT_FORCE_BLOCK).split(",")
             if x.strip()}
         self.allow_warn -= self.force_block
         self.caption_suffix = cap.SUFFIX        # ayat penutup caption (tetapan profile)
@@ -316,7 +320,9 @@ def _fresh_reel(url: str):
 
 # Tidak boleh dilepaskan walaupun melalui APPROVE_IDS
 NEVER_POST = {"visual_nudity_sexual", "visual_minor_safety", "visual_graphic_violence", "visual_self_harm",
-              "visual_drugs", "text_adult_sexual", "text_self_harm", "text_drugs"}
+              "visual_drugs", "text_adult_sexual", "text_self_harm", "text_drugs",
+              # Penapis tambahan pengguna: dera kanak-kanak, senjata, carutan berat, darah, dera haiwan
+              "visual_child_abuse", "visual_weapons", "text_severe_profanity", "visual_blood", "visual_animal_abuse"}
 
 
 def checker_layers(settings: Settings) -> tuple[int, ...]:

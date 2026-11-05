@@ -133,7 +133,7 @@ jobs:
           RECHECK: ${{ vars.RECHECK || '0' }}
           ALLOW_WARN: ${{ vars.ALLOW_WARN || 'low_resolution,text_profanity,visual_third_party_watermark' }}
           APPROVE_IDS: ${{ vars.APPROVE_IDS }}
-          FORCE_BLOCK: ${{ vars.FORCE_BLOCK || 'visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing' }}
+          FORCE_BLOCK: ${{ vars.FORCE_BLOCK || 'visual_graphic_violence,visual_self_harm,text_self_harm,visual_disturbing,visual_child_abuse,visual_weapons,text_severe_profanity,visual_blood,visual_animal_abuse' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
           CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}        # pilihan: Claude tulis caption

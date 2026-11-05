@@ -77,6 +77,16 @@ VISUAL categories (use keys exactly):
 TEXT / SPEECH categories (use keys exactly):
 {tcats}
 
+STRICT RULES FOR THIS PAGE (always severity "block"):
+- child_abuse: a child is beaten, slapped, hit, kicked, caned hard or physically abused ("kena beduk/dera/belasah").
+- weapons: a person holds, points or swings a weapon (knife/machete/parang used as a weapon, gun, rifle, stick or
+  metal rod used to hit). A kitchen knife used for cooking, or tools used for work, is NOT a weapon.
+- blood: any visible blood or bleeding wound, even a little.
+- animal_abuse: an animal is hit, kicked, tortured, thrown or deliberately hurt.
+- severe_profanity (text/speech): heavy swearing such as "fuck you", "motherfucker", "asshole", "pukimak", "puki",
+  "kimak", "lancau", "pantat", "cibai", "bangsat". Mild words like "bodoh", "babi", "bangang", "sial" are allowed:
+  report those only as "profanity" with severity "warn" or not at all.
+
 Severity: "block" = Facebook would very likely remove the video or restrict the Page.
 "warn" = may reduce reach, needs an age gate, or a human should look. Do not list anything else.
 Timestamps are seconds from the start (numbers).

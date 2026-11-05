@@ -112,8 +112,12 @@ RULES: list[Rule] = [
        "Buang pautan platform lain daripada caption."),
 
     # --- profanity (info only; may limit monetisation) ---
-    _r("profanity", INFO, r"\b(babi|bodoh|sial|celaka|puki|pukimak|pantat|fuck|shit|bitch|bangsat|lancau|kimak)\b",
-       "Bahasa kesat (boleh hadkan monetisasi).", ""),
+    _r("severe_profanity", BLOCK,
+       r"\b(fuck(?:ing|er|ed)?|f\*+k|motherfucker|asshole|ass\s*hole|pukimak|puki\s*mak|puki|kimak|lancau|pantat|cibai|"
+       r"bangsat|keparat|butoh|kote|pepek|jubur)\b",
+       "Carutan berat.", "Video ini tidak akan dipost."),
+    _r("profanity", INFO, r"\b(babi|bodoh|sial|celaka|bangang|bengap|shit|bitch|setan|haram\s*jadah)\b",
+       "Bahasa kesat ringan (dibenarkan).", ""),
 ]
 
 
