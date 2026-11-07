@@ -1,0 +1,30 @@
+name: TikTok test (sementara)
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: |
+          pip install -q -r requirements.txt
+          pip install -q -U --pre yt-dlp; V=$(pip show yt-dlp | awk '/^Version/{print $2}'); pip install -q "yt-dlp[default,curl-cffi]==$V"
+          python -m playwright install --with-deps chromium >/dev/null
+          sudo apt-get install -y -qq ffmpeg >/dev/null
+      - run: |
+          python - <<'PY'
+          import fb_reels_rss as f, postolab_relay as pr, os
+          for src in ["https://www.tiktok.com/@tiktok", "https://www.tiktok.com/@khaby.lame"]:
+              url, slug = f.normalize_reels_url(src)
+              urls, sig = f.list_reel_urls(url, 5, debug_dir="debug")
+              print(slug, len(urls), sig, urls[:3])
+              if urls:
+                  r = f.extract_reel(urls[0])
+                  print("extract:", r.id, bool(r.mp4), len(r.caption), r.error[:200])
+                  it = {"url": urls[0], "mp4": r.mp4}
+                  pr.download_reel(it, "v.mp4")
+                  print("download bytes:", os.path.getsize("v.mp4"))
+                  break
+          PY

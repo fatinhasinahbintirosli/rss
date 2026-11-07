@@ -74,7 +74,20 @@ def _group_id(url: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]", "", m.group(1)) if m else ""
 
 
+def _tiktok_user(url: str) -> str:
+    """Nama pengguna dari tiktok.com/@nama ('' jika bukan TikTok)."""
+    m = re.search(r"tiktok\.com/@([A-Za-z0-9_.-]+)", url or "", re.I)
+    return m.group(1) if m else ""
+
+
+def is_tiktok(url: str) -> bool:
+    return bool(re.search(r"(^|[/.])tiktok\.com/", url or "", re.I))
+
+
 def page_slug(url: str) -> str:
+    tt = _tiktok_user(url or "")
+    if tt:                                  # TikTok: "tt_<nama>" supaya tidak bertembung dengan page Facebook
+        return "tt_" + re.sub(r"[^a-zA-Z0-9_-]", "_", tt)
     gid = _group_id(url or "")
     if gid:                                 # group: "g<id>" supaya tidak bertembung dengan nama page
         return "g" + re.sub(r"[^a-zA-Z0-9_-]", "", gid)
@@ -89,6 +102,9 @@ def normalize_reels_url(raw: str) -> tuple[str, str]:
     url = raw.strip().rstrip("/")
     if not url.startswith("http"):
         url = "https://" + url
+    tt = _tiktok_user(url)
+    if tt:                                  # profil TikTok awam
+        return f"https://www.tiktok.com/@{tt}", page_slug(url)
     gid = _group_id(url)
     if gid:                                 # group awam: tab Media → Videos
         return f"https://www.facebook.com/groups/{gid}/media/videos", page_slug(url)
@@ -132,7 +148,8 @@ def pick_best_mp4(info: dict) -> tuple[str, int | None, int | None]:
 
 # ------------------------------------------------------------------ scraping
 # Link video yang dikumpul dari halaman Reels page ATAU tab Media → Videos group
-_VIDEO_LINK = re.compile(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})")
+# + TikTok: tiktok.com/@nama/video/<id>
+_VIDEO_LINK = re.compile(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})|/video/(\d{8,})")
 
 # Tutup popup "See more on Facebook" / log masuk (macam tekan ✕). Pulangkan bilangan yang ditutup.
 _CLOSE_POPUPS_JS = """() => {
@@ -158,6 +175,8 @@ def canonical_video_url(url: str) -> str:
     vid = video_key(url)
     if not vid:
         return ""
+    if is_tiktok(url):
+        return f"https://www.tiktok.com/@{_tiktok_user(url)}/video/{vid}"
     return f"https://www.facebook.com/reel/{vid}/" if "/reel/" in url else f"https://www.facebook.com/watch/?v={vid}"
 
 
@@ -173,11 +192,90 @@ def collect_video_links(hrefs: list[str], max_items: int) -> list[str]:
     return urls
 
 
+def list_tiktok_urls(profile_url: str, max_items: int, proxy: str = "", debug_dir: str = "",
+                     cookiefile: str = "", scrolls: int | None = None) -> tuple[list[str], list[str]]:
+    """Video dari profil TikTok awam (terbaru dahulu). yt-dlp dahulu, kemudian Chromium sebagai sandaran."""
+    signals: list[str] = []
+    import yt_dlp
+    for target in ("", "chrome"):
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": "in_playlist", "playlistend": max_items,
+                "socket_timeout": 30}
+        if proxy:
+            opts["proxy"] = proxy
+        if cookiefile:
+            opts["cookiefile"] = cookiefile
+        if target and not set_impersonate(opts, target):
+            break
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(profile_url, download=False) or {}
+            user = _tiktok_user(profile_url)
+            hrefs = []
+            for e in info.get("entries") or []:
+                u = (e or {}).get("url") or (e or {}).get("webpage_url") or ""
+                hrefs.append(u if "/video/" in u else f"https://www.tiktok.com/@{user}/video/{(e or {}).get('id')}")
+            urls = collect_video_links(hrefs, max_items)
+            if urls:
+                signals.append("TikTok: senarai melalui yt-dlp" + (f" ({target})" if target else ""))
+                return urls, signals
+            signals.append("TikTok: yt-dlp tiada video")
+        except Exception as e:  # noqa: BLE001
+            signals.append(f"TikTok yt-dlp{' ' + target if target else ''}: {str(e)[:150]}")
+    # Sandaran: buka profil dalam Chromium dan kumpul pautan /video/
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            launch = {"headless": True}
+            if proxy:
+                launch["proxy"] = {"server": proxy}
+            browser = p.chromium.launch(**launch)
+            ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
+            ck = [c for c in _netscape_cookies(cookiefile) if "tiktok" in c.get("domain", "")] if cookiefile else []
+            if ck:
+                try:
+                    ctx.add_cookies(ck)
+                except Exception:  # noqa: BLE001
+                    pass
+            page = ctx.new_page()
+            page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+            links, last, still = [], 0, 0
+            for _ in range(scrolls or 4):
+                page.keyboard.press("Escape")
+                page.mouse.wheel(0, 2500)
+                page.wait_for_timeout(1800)
+                links = page.evaluate("() => Array.from(document.querySelectorAll('a[href*=\"/video/\"]')).map(a => a.href)")
+                found = len(collect_video_links(links, max_items))
+                if found >= max_items:
+                    break
+                still = still + 1 if found == last else 0
+                last = found
+                if still >= 3:
+                    break
+            urls = collect_video_links(links, max_items)
+            if not urls:
+                body = page.inner_text("body")[:3000]
+                if re.search(r"(private|peribadi|captcha|verify|log in|couldn't find this account)", body, re.I):
+                    signals.append("TikTok: akaun peribadi / captcha / tidak dijumpai")
+                if debug_dir:
+                    os.makedirs(debug_dir, exist_ok=True)
+                    page.screenshot(path=os.path.join(debug_dir, "tiktok_page.png"), full_page=False)
+            else:
+                signals.append("TikTok: senarai melalui pelayar")
+            browser.close()
+            return urls, signals
+    except Exception as e:  # noqa: BLE001
+        signals.append(f"TikTok pelayar: {str(e)[:150]}")
+        return [], signals
+
+
 def list_reel_urls(page_url: str, max_items: int, proxy: str = "", debug_dir: str = "",
                    scrolls: int | None = None, cookiefile: str = "") -> tuple[list[str], list[str]]:
     """Buka tab Reels page (atau Media → Videos group awam), tutup popup log masuk, scroll, dan kumpul
     link video (terbaru dahulu). scrolls = bilangan scroll maksimum (lebih banyak = video lebih lama).
     Returns (urls, blocked_signals)."""
+    if is_tiktok(page_url):
+        return list_tiktok_urls(page_url, max_items, proxy, debug_dir, cookiefile, scrolls)
     from playwright.sync_api import sync_playwright
 
     is_group = "/groups/" in page_url
@@ -529,7 +627,7 @@ def build_rss(slug: str, page_url: str, reels: list[Reel]) -> str:
             d += (f'<p><b>Pautan Direct MP4:</b><br/><a href="{html.escape(r.mp4)}">🔗 Muat Turun / Main Fail MP4</a>'
                   + (f" ({r.width}x{r.height})" if r.width and r.height else "") + "</p>")
             ET.SubElement(it, "enclosure", url=r.mp4, type="video/mp4", length="0")
-        d += f'<p><a href="{r.url}">👉 Tonton Video Penuh di Facebook</a></p>'
+        d += f'<p><a href="{r.url}">👉 Tonton Video Penuh di {"TikTok" if is_tiktok(r.url) else "Facebook"}</a></p>'
         ET.SubElement(it, "description").text = d
     return minidom.parseString(ET.tostring(rss, encoding="utf-8")).toprettyxml(indent="  ")
 
@@ -706,7 +804,7 @@ def run_page(raw_url: str, client, cfg: dict) -> tuple[RunReport, list[Reel], st
             rep.errors.append(f"{r.id}: {r.error}")
         reels.append(r)
         time.sleep(1.5)        # be gentle
-    failed = [r for r in reels if not r.mp4]
+    failed = [r for r in reels if not r.mp4 and not is_tiktok(r.url)]   # sandaran pelayar hanya untuk Facebook
     if failed:
         print(f"      yt-dlp gagal untuk {len(failed)} reel. Cuba melalui pelayar...")
         try:

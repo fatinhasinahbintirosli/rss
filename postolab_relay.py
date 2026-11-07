@@ -94,7 +94,8 @@ def parse_feed(xml_text: str) -> list[dict]:
     for it in root.iter("item"):
         link = it.findtext("link") or ""
         # Reel page (/reel/<id>) atau video group (watch/?v=<id>, /videos/<id>)
-        m = re.search(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})", link)
+        # + TikTok: tiktok.com/@nama/video/<id>
+        m = re.search(r"/reel/(\d+)|[?&]v=(\d+)|/videos/(?:[^/?#]+/)?(\d{6,})|/video/(\d{8,})", link)
         enc = it.find("enclosure")
         if not m or enc is None or not enc.get("url"):
             continue
@@ -275,10 +276,31 @@ def download(url: str, dest: str, session=None) -> None:
                 f.write(chunk)
 
 
-def download_reel(item: dict, dest: str, log=print, extract=None) -> None:
+def _tiktok_download(url: str, dest: str) -> dict:
+    """TikTok: muat turun terus melalui yt-dlp (versi tanpa watermark jika ada). Pautan mp4 TikTok dalam RSS
+    terikat pada cookies sesi yt-dlp, jadi tidak boleh dimuat turun terus seperti Facebook."""
+    import shutil
+    import tempfile
+    from link_relay import fetch_video
+    with tempfile.TemporaryDirectory() as td:
+        v = fetch_video(url, td, int(env("LINK_MAX_MINUTES", "15") or 15), env("COOKIES_FILE"), env("PROXY_URL"))
+        shutil.move(v["path"], dest)
+    return v
+
+
+def download_reel(item: dict, dest: str, log=print, extract=None, tiktok=None) -> None:
     """Muat turun video reel dari RSS. Pautan mp4 Facebook LUPUT selepas beberapa jam (403/410), jadi
     reel lama dalam RSS (cth. untuk pengguna atau page yang baru) akan gagal. Jika begitu, ambil semula
     pautan mp4 yang baharu dari pautan reel itu sendiri, kemudian cuba lagi."""
+    if re.search(r"tiktok\.com/", item.get("url") or "", re.I):
+        v = (tiktok or _tiktok_download)(item["url"], dest)
+        if v.get("watermark_free") is False:
+            log("   TikTok: versi tanpa watermark tiada, video dengan watermark digunakan.")
+        if not item.get("caption") and v.get("description"):
+            item["caption"] = v["description"]
+        if not item.get("thumb") and v.get("thumb"):
+            item["thumb"] = v["thumb"]
+        return
     if item.get("mp4"):
         try:
             download(item["mp4"], dest)
