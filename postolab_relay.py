@@ -78,6 +78,7 @@ class Cfg:
         self.caption_min_words = 1              # min perkataan (julat "dari X hingga Y")
         self.caption_short = False              # yang → yg, kata ganda → ²
         self.caption_unique = True              # True: caption berlainan setiap Page; False: satu caption untuk semua
+        self.caption_original = "off"           # salin caption asal: off | append (bawah caption AI) | only (tanpa AI)
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
@@ -377,6 +378,23 @@ def gemini_ask_factory(settings: Settings, path: str):
     return ask, (lambda: client.delete(f))
 
 
+def original_caption(text: str, rec: dict | None = None) -> str:
+    """Caption asal video untuk disalin ke post. Kosong jika tiada, atau jika ada carutan berat / perkara yang
+    disekat (caption AI sahaja digunakan)."""
+    from fb_reels_rss import clean_caption
+    from video_checker.rules import scan
+    text, _ = clean_caption(text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()[:2000]
+    if not text:
+        return ""
+    blocked = sorted({h.rule.category for h in scan(text, "caption") if h.rule.severity == "block"})
+    if blocked:
+        if rec is not None:
+            rec["original_caption_dropped"] = blocked
+        return ""
+    return text
+
+
 def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, state: dict, api: Postolab,
                  checker=check_video, ask_factory=gemini_ask_factory, log=print, cache: dict | None = None) -> dict:
     rec = {"source": item["source"], "at": dt.datetime.now(dt.timezone.utc).isoformat(), "reasons": []}
@@ -427,15 +445,23 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             rec["status"] = report.verdict
             return rec
 
-        ask, cleanup = ask_factory(settings, path)
-        try:
-            history = state.get("captions", [])[-300:]
-            n_caps = len(targets) if cfg.caption_unique else 1
-            caps, rejected = cap.generate(path, n_caps, item["caption"], history, ask,
-                                          max_words=cfg.caption_max_words, min_words=cfg.caption_min_words, suffix=cfg.caption_suffix,
-                                          short=cfg.caption_short)
-        finally:
-            cleanup()
+        original = original_caption(item.get("caption") or "", rec) if cfg.caption_original != "off" else ""
+        if cfg.caption_original == "only" and original:
+            caps, rejected = [original], []            # salin caption asal sahaja, tiada AI
+            log("   caption: salin caption asal video (tanpa AI)")
+        else:
+            ask, cleanup = ask_factory(settings, path)
+            try:
+                history = state.get("captions", [])[-300:]
+                n_caps = len(targets) if cfg.caption_unique else 1
+                caps, rejected = cap.generate(path, n_caps, item["caption"], history, ask,
+                                              max_words=cfg.caption_max_words, min_words=cfg.caption_min_words,
+                                              suffix=cfg.caption_suffix, short=cfg.caption_short)
+            finally:
+                cleanup()
+            if original and caps:
+                caps = [f"{c}\n\n{original}" for c in caps]   # caption AI di atas, caption asal di bawah
+        ai_caps = [] if cfg.caption_original == "only" and original else caps
         rec["caption_rejected"] = rejected[:10]
         if not caps:
             rec.update(status="error", summary="Gemini gagal hasilkan caption yang menepati syarat.")
@@ -469,7 +495,8 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
     rec["scheduled"] = [{"page": names.get(c["pageId"], c["pageId"]), "message": msg.get(c["pageId"], ""),
                          "when": c["scheduled_at"]} for c in res.get("created", [])]
     rec["status"] = "posted" if rec["scheduled"] else "skipped"
-    state.setdefault("captions", []).extend(cap.clean_body(p["message"], [cfg.caption_suffix]) for p in posts)
+    # Sejarah caption (elak ayat berulang) simpan bahagian AI sahaja
+    state.setdefault("captions", []).extend(cap.clean_body(m.split("\n\n")[0], [cfg.caption_suffix]) for m in ai_caps)
     state["captions"] = state["captions"][-500:]
     return rec
 
@@ -509,6 +536,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
     c.allow_warn = set(pc.get("allow_warn") or []) - c.force_block
     c.caption_short = pc.get("caption_short", True) is not False
     c.caption_unique = pc.get("caption_unique", True) is not False
+    c.caption_original = pc.get("caption_original") if pc.get("caption_original") in ("append", "only") else "off"
     tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
     c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
     c.comment_image = pc.get("comment_image", True) is not False

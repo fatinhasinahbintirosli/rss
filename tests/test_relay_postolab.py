@@ -222,6 +222,30 @@ class TestRelay(unittest.TestCase):
         self.assertNotEqual(posts[0]["message"], posts[1]["message"])
         self.assertEqual(len(state["captions"]), 2)
 
+    def test_caption_original_append_and_only(self):
+        no_ai = lambda settings, path: (_ for _ in ()).throw(AssertionError("AI tidak patut dipanggil"))
+        for mode, ask, expect in [
+            ("append", fake_ask_factory(["Dpt info laki ni dah", "Katanya staff ni mrh sbb"]),
+             "Dpt info laki ni dah...see-moo.re\n\nGile 14K siaw nak kena bayar malam ni"),
+            ("only", no_ai, "Gile 14K siaw nak kena bayar malam ni"),
+        ]:
+            api = FakePostolab()
+            c = relay.profile_cfg(relay.Cfg(), "deli", {"dry_run": False}, {"caption_original": mode}, {})
+            c.source_map = {"penmerahdotcoms": {"111"}}
+            state = {"captions": []}
+            rec = relay.process_reel(self.item(HD), api.pages(), c, self.settings, state, api,
+                                     checker=fake_checker(GeminiReview()), ask_factory=ask, log=lambda m: None)
+            self.assertEqual(rec["status"], "posted", rec)
+            self.assertEqual(api.calls[0][2][0]["message"], expect)
+            self.assertEqual(len(state["captions"]), 0 if mode == "only" else 2)
+        self.assertEqual(relay.profile_cfg(relay.Cfg(), "x", {}, {}, {}).caption_original, "off")
+
+    def test_original_caption_with_severe_profanity_dropped(self):
+        rec = {}
+        self.assertEqual(relay.original_caption("pukimak betul budak ni", rec), "")
+        self.assertIn("severe_profanity", rec["original_caption_dropped"])
+        self.assertEqual(relay.original_caption("Bodoh betul... See more"), "Bodoh betul")
+
     def test_first_comment_with_screenshot(self):
         templates = [{"id": "t1", "text": "Tonton part 2 sini : https://vt.tiktok.com/x/"}]
         c = relay.profile_cfg(relay.Cfg(), "deli", {"dry_run": False}, {"comment_id": "t1"}, {}, templates)
