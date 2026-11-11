@@ -615,6 +615,18 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
     min_words = max(1, min(max_words, int(pc.get("caption_min_words") or 1)))
     short = pc.get("caption_short", True) is not False
     unique = pc.get("caption_unique", True) is not False   # False: satu caption untuk semua page
+    # Tulisan atas video: setiap pautan boleh pilih (detail.video_text = off | ai | manual), lalai ikut tetapan profile
+    det = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+    vt_mode = det.get("video_text") if det.get("video_text") in ("off", "ai", "manual") else (
+        "ai" if pc.get("video_text") is True else "off")
+    vt_manual = str(det.get("video_text_manual") or "").strip()[:120] if vt_mode == "manual" else ""
+    if vt_mode == "manual" and not vt_manual:
+        vt_mode = "ai"
+    if vt_mode != "off":
+        rec["detail"]["video_text"] = vt_mode                 # kekal untuk cubaan semula
+        if vt_manual:
+            rec["detail"]["video_text_manual"] = vt_manual
+    overlay = {} if vt_mode != "off" else None
 
     with tempfile.TemporaryDirectory() as td:
         v = fetcher(item["url"], td, int(env("LINK_MAX_MINUTES", "15") or 15), env("COOKIES_FILE"), env("PROXY_URL"))
@@ -630,7 +642,8 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         ask, cleanup = ask_factory(settings, v["path"])
         try:
             caps, rejected = cap.generate(v["path"], len(targets) if unique else 1, context, history, ask,
-                                          max_words=max_words, min_words=min_words, suffix=suffix, short=short)
+                                          max_words=max_words, min_words=min_words, suffix=suffix, short=short,
+                                          overlay=overlay)
         finally:
             cleanup()
         if rejected:
@@ -649,7 +662,12 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         comment_img = None
         if comment and item.get("comment_image", True):
             comment_img = api.upload(screenshot(v["path"], v.get("duration") or 0), "image/jpeg")
-        video_url = api.upload(v["path"])
+        upload_path = v["path"]
+        if overlay is not None:
+            import video_text
+            upload_path, info = video_text.apply(v["path"], overlay.get("data"), caps, manual=vt_manual, log=log)
+            rec["detail"]["video_text_result"] = {k: info.get(k) for k in ("text", "emoji", "position", "skip") if info.get(k)}
+        video_url = api.upload(upload_path)
 
     slots, stagger = slots_for(pc)
     if (item.get("schedule_mode") or "") == "next":

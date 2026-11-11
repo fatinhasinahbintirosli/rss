@@ -27,6 +27,7 @@ Balas JSON sahaja:
   "twist": "bahagian paling mengejutkan / menyentuh hati / kelakar, atau kosong jika tiada",
   "percakapan": "apa yang dicakap orang dalam video (ringkas), atau kosong",
   "teks_skrin": "teks yang tertulis di skrin, atau kosong",
+  "kedudukan_teks_skrin": ["di mana tulisan BESAR yang dibakar dalam video berada: atas / tengah / bawah; [] jika tiada (abaikan watermark kecil)"],
   "emosi": "perasaan utama video: sedih, lucu, marah, terharu, seram, dll."
 }"""
 

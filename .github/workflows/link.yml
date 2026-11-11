@@ -47,6 +47,16 @@ jobs:
             sudo apt-get install -y --no-install-recommends ffmpeg
           fi
 
+
+      # Fon emoji berwarna untuk "tulisan atas video" (jika gagal, tulisan tetap dilukis tanpa emoji)
+      - name: Fon emoji (tulisan atas video)
+        continue-on-error: true
+        timeout-minutes: 3
+        run: |
+          mkdir -p "$RUNNER_TEMP/fonts"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/fonts/NotoColorEmoji.ttf" https://github.com/googlefonts/noto-emoji/raw/main/fonts/NotoColorEmoji.ttf \
+            && echo "VIDEO_TEXT_EMOJI_FONT=$RUNNER_TEMP/fonts/NotoColorEmoji.ttf" >> "$GITHUB_ENV"
+          ls /usr/share/fonts/truetype/dejavu /usr/share/fonts/truetype/liberation 2>/dev/null | head -5 || true
       - name: Pasang pakej
         timeout-minutes: 8
         run: |

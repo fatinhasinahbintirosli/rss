@@ -79,6 +79,7 @@ class Cfg:
         self.caption_short = False              # yang → yg, kata ganda → ²
         self.caption_unique = True              # True: caption berlainan setiap Page; False: satu caption untuk semua
         self.caption_original = "off"           # salin caption asal: off | append (bawah caption AI) | only (tanpa AI)
+        self.video_text = False                 # tulisan atas video (AI tulis, kotak kuning)
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
@@ -446,9 +447,19 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
             return rec
 
         original = original_caption(item.get("caption") or "", rec) if cfg.caption_original != "off" else ""
+        overlay = {} if cfg.video_text else None      # tulisan atas video: diminta dalam permintaan caption yang sama
         if cfg.caption_original == "only" and original:
-            caps, rejected = [original], []            # salin caption asal sahaja, tiada AI
+            caps, rejected = [original], []            # salin caption asal sahaja, tiada AI untuk caption
             log("   caption: salin caption asal video (tanpa AI)")
+            if overlay is not None:
+                ask, cleanup = ask_factory(settings, path)
+                try:
+                    import video_text
+                    overlay["data"] = ask(video_text.only_prompt(original, item.get("caption") or ""))
+                except Exception as e:  # noqa: BLE001
+                    log(f"   tulisan atas video: AI gagal ({str(e)[:120]})")
+                finally:
+                    cleanup()
         else:
             ask, cleanup = ask_factory(settings, path)
             try:
@@ -456,7 +467,7 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
                 n_caps = len(targets) if cfg.caption_unique else 1
                 caps, rejected = cap.generate(path, n_caps, item["caption"], history, ask,
                                               max_words=cfg.caption_max_words, min_words=cfg.caption_min_words,
-                                              suffix=cfg.caption_suffix, short=cfg.caption_short)
+                                              suffix=cfg.caption_suffix, short=cfg.caption_short, overlay=overlay)
             finally:
                 cleanup()
             if original and caps:
@@ -481,12 +492,20 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
                 from link_relay import screenshot          # import lewat: elak import bulat
                 comment_img = api.upload(screenshot(path), "image/jpeg")
 
+        upload_path = path
+        if overlay is not None:
+            import video_text
+            if cfg.dry_run:
+                rec["video_text"] = video_text.plan(overlay.get("data"), caps)
+            else:
+                upload_path, rec["video_text"] = video_text.apply(path, overlay.get("data"), caps, log=log)
+
         if cfg.dry_run:
             rec.update(status="green", scheduled=[{"page": next(x["page_name"] for x in targets
                                                                if str(x["page_id"]) == p["pageId"]),
                                                    "message": p["message"], "when": "(dry run)"} for p in posts])
             return rec
-        video_url = api.upload(path)
+        video_url = api.upload(upload_path)
 
     res = api.schedule(video_url, item.get("sid") or item["id"], posts, cfg.profile, cfg.stagger, cfg.slots,
                        first_comment=cfg.comment_text, comment_image_url=comment_img)
@@ -537,6 +556,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
     c.caption_short = pc.get("caption_short", True) is not False
     c.caption_unique = pc.get("caption_unique", True) is not False
     c.caption_original = pc.get("caption_original") if pc.get("caption_original") in ("append", "only") else "off"
+    c.video_text = pc.get("video_text") is True
     tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
     c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
     c.comment_image = pc.get("comment_image", True) is not False

@@ -204,9 +204,12 @@ def fill_to(captions: list[str], n: int) -> list[str]:
 
 
 def generate(path_or_file, n: int, source_caption: str, history: list[str], ask, rounds: int = 3,
-             max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False, min_words: int = 1):
+             max_words: int = MAX_WORDS, suffix: str = SUFFIX, short: bool = False, min_words: int = 1,
+             overlay: dict | None = None):
     """ask(prompt) -> dict with 'captions'. Retries until n valid captions or rounds used up.
-    Untuk banyak Page (cth. 100), caption diminta berperingkat (CHUNK setiap permintaan)."""
+    Untuk banyak Page (cth. 100), caption diminta berperingkat (CHUNK setiap permintaan).
+    overlay: jika dict diberi, permintaan PERTAMA juga minta tulisan atas video (tiada panggilan AI tambahan);
+    jawapannya disimpan dalam overlay["data"]."""
     chosen: list[str] = []
     rejected_all: list[str] = []
     rounds = max(rounds, -(-n // CHUNK) + 2)
@@ -214,8 +217,15 @@ def generate(path_or_file, n: int, source_caption: str, history: list[str], ask,
         need = n - len(chosen)
         if need <= 0:
             break
-        data = ask(build_prompt(min(need, CHUNK) + 3, source_caption, history + chosen, max_words, suffix, short,
-                                min_words))
+        prompt = build_prompt(min(need, CHUNK) + 3, source_caption, history + chosen, max_words, suffix, short,
+                              min_words)
+        want_overlay = overlay is not None and not overlay.get("data")
+        if want_overlay:
+            import video_text
+            prompt = video_text.add_to_prompt(prompt)
+        data = ask(prompt)
+        if want_overlay and isinstance(data, dict) and data.get("teks_video"):
+            overlay["data"] = {k: data.get(k) for k in ("teks_video", "emoji", "mood", "teks_sedia_ada")}
         cands = data.get("captions") if isinstance(data, dict) else None
         if not isinstance(cands, list):
             rejected_all.append("jawapan Gemini tiada senarai captions")
