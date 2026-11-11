@@ -162,7 +162,8 @@ def ensure_chromium() -> None:
     _PW_READY = True
 
 
-def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int = 1) -> tuple[str, str, str]:
+def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int = 1,
+                      cookiefile: str = "") -> tuple[str, str, str]:
     """Buka halaman dalam Chromium (tanpa paparan) seperti pelawat biasa, tangkap fail video yang dimuatkan
     oleh JavaScript halaman (Threads memuatkan video selepas halaman dibuka). Pulangkan (mp4, tajuk, thumbnail)."""
     ensure_chromium()
@@ -175,6 +176,16 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
             launch["proxy"] = {"server": proxy}
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
+        if cookiefile:
+            # Post Threads "tidak tersedia untuk semua" (had umur / negara) hanya boleh dibuka bila log masuk:
+            # guna cookies threads.com / instagram.com dari LINK_COOKIES
+            import fb_reels_rss as fbr
+            ck = [c for c in fbr._netscape_cookies(cookiefile) if re.search(r"threads\.|instagram\.", c.get("domain", ""))]
+            if ck:
+                try:
+                    ctx.add_cookies(ck)
+                except Exception:
+                    pass
         page = ctx.new_page()
 
         def on_response(r):
@@ -193,6 +204,11 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
         except Exception:
             pass
         page.wait_for_timeout(wait_ms)
+        body = page.inner_text("body")[:600] if not page.query_selector("video") else ""
+        if re.search(r"isn't available to everyone|not available to everyone|Thread not available", body, re.I):
+            browser.close()
+            raise DownloadError("Post Threads ini terhad (tidak tersedia untuk semua, cth. had umur/negara) dan perlu "
+                                "log masuk. Tambah cookies threads.com dalam secret LINK_COOKIES.")
         info = page.evaluate("""() => {
             const vids = Array.from(document.querySelectorAll('video'));
             const og = (p) => (document.querySelector(`meta[property="${p}"]`) || {}).content || '';
@@ -407,11 +423,16 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             # Threads memuatkan video melalui JavaScript → buka dalam Chromium tanpa paparan
             try:
                 print("   Threads: cuba melalui browser (Chromium)…")
-                mp4, title, thumb = browser_video_url(threads_candidates(url)[1], env("PROXY_URL"), index=index)
+                mp4, title, thumb = browser_video_url(threads_candidates(url)[1], proxy or env("PROXY_URL"),
+                                                      index=index, cookiefile=cookiefile)
                 download(mp4, path)
                 if not _has_video(path):
                     raise DownloadError("Fail yang dimuatkan oleh halaman bukan video.")
                 last_err = None
+            except DownloadError as e3:
+                if "terhad" in str(e3):
+                    raise
+                last_err = e3
             except Exception as e3:
                 last_err = e3
         if last_err is not None:
