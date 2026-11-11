@@ -38,3 +38,12 @@ def test_page_video_url_second(monkeypatch):
     assert mp4 == "https://cdn.x/B.mp4" and title == "T"
     with pytest.raises(lr.DownloadError, match="video ke-3"):
         lr._page_video_url("u", S(), index=3)
+
+
+def test_dash_piece_detection():
+    import base64
+    efg = base64.urlsafe_b64encode(b'{"vencode_tag":"ig-xpvds.feed.igwww-C3.dash_ln_heaac"}').decode().rstrip("=")
+    assert lr._is_dash_piece(f"https://cdn.x/A.mp4?efg={efg}&_nc=1")
+    assert lr._is_dash_piece("https://cdn.x/A.mp4?bytestart=0&byteend=900")
+    full = base64.urlsafe_b64encode(b'{"vencode_tag":"xpv_progressive.INSTAGRAM.CLIPS"}').decode()
+    assert not lr._is_dash_piece(f"https://cdn.x/B.mp4?efg={full}")

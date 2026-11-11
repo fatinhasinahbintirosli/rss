@@ -133,6 +133,22 @@ def _mp4_key(u: str) -> str:
     return re.split(r"[?#]", u.replace("\\/", "/"))[0].rsplit("/", 1)[-1]
 
 
+def _is_dash_piece(u: str) -> bool:
+    """Serpihan DASH Meta (bytestart/byteend, atau efg berisi 'dash_'): audio/video berasingan, bukan fail penuh."""
+    import base64
+    if "bytestart=" in u or "byteend=" in u:
+        return True
+    m = re.search(r"[?&]efg=([^&]+)", u)
+    if m:
+        from urllib.parse import unquote
+        try:
+            raw = unquote(m.group(1))
+            return "dash" in base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "ignore").lower()
+        except Exception:
+            return False
+    return False
+
+
 def _unescape_url(u: str) -> str:
     u = u.replace("\\/", "/").replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u0025", "%")
     return html.unescape(u)
@@ -211,6 +227,12 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
             browser.close()
             raise DownloadError("Post Threads ini terhad (tidak tersedia untuk semua, cth. had umur/negara) dan perlu "
                                 "log masuk. Tambah cookies threads.com dalam secret THREADS_COOKIES.")
+        # Video PENUH (progressive mp4) dalam data halaman ("video_versions"). Fail yang dimuatkan oleh pemain
+        # video Threads ialah serpihan DASH (audio/video berasingan, sebahagian sahaja) → bukan video lengkap.
+        try:
+            page_vids = page_video_list(page.content())
+        except Exception:
+            page_vids = []
         info = page.evaluate("""() => {
             const vids = Array.from(document.querySelectorAll('video'));
             const og = (p) => (document.querySelector(`meta[property="${p}"]`) || {}).content || '';
@@ -221,6 +243,11 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
         browser.close()
     srcs = [u for u in info.get("srcs") or [] if u.startswith("http")]
     posters = info.get("posters") or []
+    if page_vids:
+        mp4 = pick_nth(page_vids, index)
+        poster = posters[index - 1] if len(posters) >= index else ""
+        return mp4, info.get("title") or "", poster or info.get("image") or ""
+    seen = [u for u in seen if not _is_dash_piece(u)] or seen     # elak serpihan DASH jika ada pilihan lain
     if index > 1:
         # Post dengan beberapa video: urutan elemen <video> dalam halaman, atau urutan fail yang dimuatkan
         vids, keys = [], set()
