@@ -86,7 +86,7 @@ class ClaudeWriter:
         return h
 
     def ask_json(self, prompt: str) -> dict:
-        r = self.s.post(f"{self.base}/v1/messages", headers=self._headers(), timeout=120, json={
+        r = self.s.post(f"{self.base}/v1/messages", headers=self._headers(), timeout=75, json={
             "model": self.model, "max_tokens": 2500, "temperature": 1.0,
             "messages": [{"role": "user", "content": prompt}],
         })
