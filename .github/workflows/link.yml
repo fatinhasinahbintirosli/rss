@@ -64,6 +64,13 @@ jobs:
         if: env.LINK_COOKIES != ''
         run: printf '%s' "$LINK_COOKIES" > link_cookies.txt && echo "COOKIES_FILE=link_cookies.txt" >> "$GITHUB_ENV"
 
+      # Pilihan: cookies threads.com (akaun kedua) untuk post Threads terhad ("not available to everyone")
+      - name: Sediakan cookies Threads (pilihan)
+        env:
+          THREADS_COOKIES: ${{ secrets.THREADS_COOKIES }}
+        if: env.THREADS_COOKIES != ''
+        run: printf '%s' "$THREADS_COOKIES" > threads_cookies.txt && echo "THREADS_COOKIES_FILE=threads_cookies.txt" >> "$GITHUB_ENV"
+
       - name: Proses pautan video ke Postolab
         env:
           POSTOLAB_URL: ${{ vars.POSTOLAB_URL || 'https://postolab.com' }}

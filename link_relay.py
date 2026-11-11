@@ -176,11 +176,13 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
             launch["proxy"] = {"server": proxy}
         browser = p.chromium.launch(**launch)
         ctx = browser.new_context(user_agent=UA, viewport={"width": 1280, "height": 900}, locale="ms-MY")
-        if cookiefile:
+        cookie_files = [f for f in (env("THREADS_COOKIES_FILE"), cookiefile) if f]
+        if cookie_files:
             # Post Threads "tidak tersedia untuk semua" (had umur / negara) hanya boleh dibuka bila log masuk:
-            # guna cookies threads.com / instagram.com dari LINK_COOKIES
+            # guna cookies threads.com / instagram.com dari secret THREADS_COOKIES (atau LINK_COOKIES)
             import fb_reels_rss as fbr
-            ck = [c for c in fbr._netscape_cookies(cookiefile) if re.search(r"threads\.|instagram\.", c.get("domain", ""))]
+            ck = [c for f in cookie_files for c in fbr._netscape_cookies(f)
+                  if re.search(r"threads\.|instagram\.", c.get("domain", ""))]
             if ck:
                 try:
                     ctx.add_cookies(ck)
@@ -208,7 +210,7 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int
         if re.search(r"isn't available to everyone|not available to everyone|Thread not available", body, re.I):
             browser.close()
             raise DownloadError("Post Threads ini terhad (tidak tersedia untuk semua, cth. had umur/negara) dan perlu "
-                                "log masuk. Tambah cookies threads.com dalam secret LINK_COOKIES.")
+                                "log masuk. Tambah cookies threads.com dalam secret THREADS_COOKIES.")
         info = page.evaluate("""() => {
             const vids = Array.from(document.querySelectorAll('video'));
             const og = (p) => (document.querySelector(`meta[property="${p}"]`) || {}).content || '';
