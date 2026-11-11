@@ -110,6 +110,29 @@ def threads_candidates(url: str) -> list[str]:
     return [f"{base}/embed", base]
 
 
+def split_video_index(url: str) -> tuple[str, int]:
+    """Pautan dari Video Link boleh berakhir dengan '#video=N' (post yang ada beberapa video, cth. Threads).
+    Pulangkan (pautan tanpa penanda, N) — N=1 jika tiada."""
+    m = re.search(r"#video=(\d+)\s*$", url or "")
+    if not m:
+        return url, 1
+    return url[:m.start()], max(1, min(20, int(m.group(1))))
+
+
+def pick_nth(items: list, index: int, what: str = "video"):
+    """Ambil item ke-N (1 = pertama) dengan mesej jelas jika post tidak cukup video."""
+    if not items:
+        raise DownloadError(f"Pautan ini tiada {what}.")
+    if index > len(items):
+        raise DownloadError(f"Post ini cuma ada {len(items)} video, tiada video ke-{index}.")
+    return items[index - 1]
+
+
+def _mp4_key(u: str) -> str:
+    """Kunci fail video (tanpa query) untuk buang pendua kualiti/pautan berulang."""
+    return re.split(r"[?#]", u.replace("\\/", "/"))[0].rsplit("/", 1)[-1]
+
+
 def _unescape_url(u: str) -> str:
     u = u.replace("\\/", "/").replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u0025", "%")
     return html.unescape(u)
@@ -139,7 +162,7 @@ def ensure_chromium() -> None:
     _PW_READY = True
 
 
-def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000) -> tuple[str, str, str]:
+def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000, index: int = 1) -> tuple[str, str, str]:
     """Buka halaman dalam Chromium (tanpa paparan) seperti pelawat biasa, tangkap fail video yang dimuatkan
     oleh JavaScript halaman (Threads memuatkan video selepas halaman dibuka). Pulangkan (mp4, tajuk, thumbnail)."""
     ensure_chromium()
@@ -171,20 +194,49 @@ def browser_video_url(url: str, proxy: str = "", wait_ms: int = 8000) -> tuple[s
             pass
         page.wait_for_timeout(wait_ms)
         info = page.evaluate("""() => {
-            const v = document.querySelector('video');
+            const vids = Array.from(document.querySelectorAll('video'));
             const og = (p) => (document.querySelector(`meta[property="${p}"]`) || {}).content || '';
-            return { src: v ? (v.currentSrc || v.src || '') : '', poster: v ? (v.poster || '') : '',
+            return { srcs: vids.map((v) => v.currentSrc || v.src || (v.querySelector('source') || {}).src || ''),
+                     posters: vids.map((v) => v.poster || ''),
                      title: og('og:title') || og('og:description') || document.title || '', image: og('og:image') };
         }""")
         browser.close()
-    src = info.get("src") or ""
-    mp4 = src if src.startswith("http") else next((u for u in seen if ".mp4" in u), seen[0] if seen else "")
+    srcs = [u for u in info.get("srcs") or [] if u.startswith("http")]
+    posters = info.get("posters") or []
+    if index > 1:
+        # Post dengan beberapa video: urutan elemen <video> dalam halaman, atau urutan fail yang dimuatkan
+        vids, keys = [], set()
+        for u in srcs + [u for u in seen if ".mp4" in u]:
+            if _mp4_key(u) not in keys:
+                keys.add(_mp4_key(u))
+                vids.append(u)
+        mp4 = pick_nth(srcs if len(srcs) >= index else vids, index)
+        poster = posters[index - 1] if len(posters) >= index else ""
+        return strip_byte_range(mp4), info.get("title") or "", poster or info.get("image") or ""
+    mp4 = srcs[0] if srcs else next((u for u in seen if ".mp4" in u), seen[0] if seen else "")
     if not mp4:
         raise DownloadError("Tiada video dimuatkan oleh halaman (post mungkin gambar sahaja atau peribadi).")
-    return strip_byte_range(mp4), info.get("title") or "", info.get("poster") or info.get("image") or ""
+    return strip_byte_range(mp4), info.get("title") or "", (posters[0] if posters else "") or info.get("image") or ""
 
 
-def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
+def page_video_list(text: str) -> list[str]:
+    """Semua video dalam HTML post (satu pautan setiap video, ikut urutan). Setiap "video_versions" ialah
+    satu video (dengan beberapa kualiti) → ambil pautan pertama setiap satu."""
+    out, keys = [], set()
+    for m in re.finditer(r"video_versions", text):
+        chunk = text[m.end():m.end() + 6000]
+        u = re.search(r'(https?:(?:\\\\?/){2}[^"\s<>]*?\.mp4[^"\s<>]*?)(?=\\\\?")', chunk) or \
+            re.search(r'"url"\s*:\s*"(https?:[^"]+?\.mp4[^"]*)"', chunk)
+        if not u:
+            continue
+        mp4 = _unescape_url(u.group(1))
+        if _mp4_key(mp4) not in keys:
+            keys.add(_mp4_key(mp4))
+            out.append(mp4)
+    return out
+
+
+def _page_video_url(url: str, session=None, index: int = 1) -> tuple[str, str, str]:
     """Sandaran untuk laman yang yt-dlp tidak kenal (cth. Threads): cari pautan mp4 dalam HTML halaman.
     Pulangkan (mp4_url, tajuk, thumbnail)."""
     s = session or requests
@@ -197,6 +249,17 @@ def _page_video_url(url: str, session=None) -> tuple[str, str, str]:
             re.search(rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']', text)
         return html.unescape(m.group(1)) if m else ""
 
+    if index > 1:
+        vids = page_video_list(text)
+        if len(vids) < index:
+            # Cuba elemen <video> dalam HTML
+            for m in re.finditer(r'<(?:video|source)\b[^>]*\bsrc=["\']([^"\']+)', text, re.I):
+                u = html.unescape(m.group(1))
+                if not u.startswith("blob:") and _mp4_key(u) not in {_mp4_key(v) for v in vids}:
+                    vids.append(u)
+        if len(vids) < index:
+            raise DownloadError(f"Hanya {len(vids)} video ditemui dalam halaman, tiada video ke-{index}.")
+        return html.unescape(vids[index - 1]), meta("og:title") or meta("og:description"), ""
     mp4 = meta("og:video:secure_url") or meta("og:video:url") or meta("og:video")
     if not mp4:
         m = re.search(r'<(?:video|source)\b[^>]*\bsrc=["\']([^"\']+)', text, re.I)
@@ -243,9 +306,13 @@ def pick_tiktok_format(formats: list[dict]) -> tuple[dict | None, bool]:
 
 
 def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = "", proxy: str = "",
-                impersonate: str = "") -> dict:
-    """Muat turun video. Pulangkan {path, title, description, thumb, duration, watermark_free}."""
+                impersonate: str = "", index: int = 0) -> dict:
+    """Muat turun video. Pulangkan {path, title, description, thumb, duration, watermark_free}.
+    index: video ke-N dalam post yang ada beberapa video (0 = baca dari hujung pautan '#video=N', lalai 1)."""
     import yt_dlp
+
+    if not index:
+        url, index = split_video_index(url)
 
     tiktok = {"free": None}
 
@@ -256,7 +323,7 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             yield f
 
     opts = {
-        "quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30,
+        "quiet": True, "no_warnings": True, "noplaylist": index == 1, "socket_timeout": 30,
         "outtmpl": os.path.join(outdir, "video.%(ext)s"),
         # Terbaik ≤1080p; utamakan mp4 (H.264) supaya tidak perlu tukar format
         # [vcodec!=none] elak "format" gambar/storyboard atau audio sahaja
@@ -281,9 +348,9 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             info = ydl.extract_info(url, download=False) or {}
             if info.get("_type") == "playlist":
                 entries = [e for e in (info.get("entries") or []) if e]
-                if not entries:
-                    raise DownloadError("Pautan ini tiada video.")
-                info = entries[0]
+                info = pick_nth(entries, index)
+            elif index > 1:
+                raise DownloadError(f"Post ini cuma ada 1 video, tiada video ke-{index}.")
             dur = info.get("duration") or 0
             if dur and dur > max_minutes * 60:
                 raise DownloadError(f"Video terlalu panjang ({round(dur / 60)} minit, had {max_minutes} minit).")
@@ -312,12 +379,12 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             for tgt in ("firefox", "chrome"):
                 try:
                     print(f"   Facebook: cuba semula yt-dlp menyamar {tgt}…")
-                    got = fetch_video(url, outdir, max_minutes, cookiefile, proxy, impersonate=tgt)
+                    got = fetch_video(url, outdir, max_minutes, cookiefile, proxy, impersonate=tgt, index=index)
                     print(f"   Facebook: berjaya dengan impersonate {tgt}.")
                     return got
                 except DownloadError as e2:
                     print(f"   impersonate {tgt}: {str(e2)[:200]}")
-        if is_facebook(url):
+        if is_facebook(url) and index == 1:
             # Facebook kerap tukar format halaman sehingga yt-dlp gagal ("Cannot parse data").
             # Sandaran: buka dalam Chromium dan ambil pautan video (ada suara) dari halaman.
             got = facebook_browser_video(url, outdir, cookiefile, proxy)
@@ -328,7 +395,7 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
         path, title, thumb, last_err = os.path.join(outdir, "video_page.mp4"), "", "", None
         for page in threads_candidates(url) or [url]:
             try:
-                mp4, title, thumb = _page_video_url(page)
+                mp4, title, thumb = _page_video_url(page, index=index)
                 download(mp4, path)
                 if not _has_video(path):
                     raise DownloadError("Pautan video dalam halaman bukan fail video.")
@@ -340,7 +407,7 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
             # Threads memuatkan video melalui JavaScript → buka dalam Chromium tanpa paparan
             try:
                 print("   Threads: cuba melalui browser (Chromium)…")
-                mp4, title, thumb = browser_video_url(threads_candidates(url)[1], env("PROXY_URL"))
+                mp4, title, thumb = browser_video_url(threads_candidates(url)[1], env("PROXY_URL"), index=index)
                 download(mp4, path)
                 if not _has_video(path):
                     raise DownloadError("Fail yang dimuatkan oleh halaman bukan video.")
