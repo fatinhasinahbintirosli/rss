@@ -110,6 +110,60 @@ def threads_candidates(url: str) -> list[str]:
     return [f"{base}/embed", base]
 
 
+def resolve_threads_share(url: str, cookiefile: str = "") -> str:
+    """Pautan kongsi Threads (threads.com/share/XXXX) → pautan post sebenar (@nama/post/KOD).
+    Cuba ikut redirect HTTP, kemudian og:url / canonical dalam HTML, akhir sekali pelayar."""
+    if not re.search(r"threads\.(?:com|net)/share/", url or "", re.I):
+        return url
+    post_re = re.compile(r"https?://(?:www\.)?threads\.(?:com|net)/@[\w.\-]+/post/[\w\-]+", re.I)
+    files = [f for f in (env("THREADS_COOKIES_FILE"), cookiefile) if f]
+    try:
+        import fb_reels_rss as fbr
+        s = requests.Session()
+        for f in files:
+            for c in fbr._netscape_cookies(f):
+                if re.search(r"threads\.|instagram\.", c.get("domain", "")):
+                    s.cookies.set(c["name"], c["value"], domain=c["domain"], path=c.get("path", "/"))
+        r = s.get(url, headers={"User-Agent": UA, "Accept-Language": "ms,en;q=0.8"}, timeout=30, allow_redirects=True)
+        for cand in [r.url] + [h.headers.get("location", "") for h in r.history]:
+            m = post_re.search(cand or "")
+            if m:
+                return m.group(0)
+        m = re.search(r'(?:og:url"\s+content|rel="canonical"\s+href)="([^"]+)"', r.text or "")
+        if m and post_re.search(m.group(1)):
+            return post_re.search(m.group(1)).group(0)
+    except Exception:
+        pass
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(user_agent=UA)
+            import fb_reels_rss as fbr
+            ck = [c for f in files for c in fbr._netscape_cookies(f) if re.search(r"threads\.|instagram\.", c.get("domain", ""))]
+            if ck:
+                try:
+                    ctx.add_cookies(ck)
+                except Exception:
+                    pass
+            page = ctx.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            for _ in range(10):
+                m = post_re.search(page.url)
+                if m:
+                    break
+                page.wait_for_timeout(1000)
+            final = page.url
+            browser.close()
+        m = post_re.search(final)
+        if m:
+            return m.group(0)
+    except Exception:
+        pass
+    raise DownloadError("Pautan kongsi Threads tidak dapat dibuka. Buka pautan itu dan salin pautan post penuh "
+                        "(https://www.threads.com/@nama/post/...).")
+
+
 def split_video_index(url: str) -> tuple[str, int]:
     """Pautan dari Video Link boleh berakhir dengan '#video=N' (post yang ada beberapa video, cth. Threads).
     Pulangkan (pautan tanpa penanda, N) — N=1 jika tiada."""
@@ -358,6 +412,7 @@ def fetch_video(url: str, outdir: str, max_minutes: int = 15, cookiefile: str = 
 
     if not index:
         url, index = split_video_index(url)
+    url = resolve_threads_share(url, cookiefile)
 
     tiktok = {"free": None}
 
