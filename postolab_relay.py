@@ -80,6 +80,7 @@ class Cfg:
         self.caption_unique = True              # True: caption berlainan setiap Page; False: satu caption untuk semua
         self.caption_original = "off"           # salin caption asal: off | append (bawah caption AI) | only (tanpa AI)
         self.video_text = False                 # tulisan atas video (AI tulis, kotak kuning)
+        self.isolate_voice = False              # video TikTok: buang muzik, kekal suara (Demucs)
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
         self.slots = None             # {"start","end","step"} dari tetapan profile (None = lalai Postolab)
@@ -409,6 +410,15 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, f"{item['id']}.mp4")
         download_reel(item, path, log)
+        # Video TikTok + pilihan "Buang muzik, kekal suara" (profile): asingkan suara sebelum semakan & upload.
+        if cfg.isolate_voice and re.search(r"tiktok\.com/", item.get("url") or "", re.I):
+            import voice_isolate
+            try:
+                path = voice_isolate.isolate(path, log)
+                rec["voice"] = "muzik dibuang"
+            except voice_isolate.NoVoice as e:
+                rec.update(status="skipped", summary=f"Dilangkau: {e}")
+                return rec
         # Caption asal TIDAK dipost (diganti caption baru yang disemak berasingan), jadi semak video sahaja.
         # Reel yang sama untuk beberapa profile: semak sekali sahaja dalam satu larian.
         if cache is not None and item["id"] in cache:
@@ -557,6 +567,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
     c.caption_unique = pc.get("caption_unique", True) is not False
     c.caption_original = pc.get("caption_original") if pc.get("caption_original") in ("append", "only") else "off"
     c.video_text = pc.get("video_text") is True
+    c.isolate_voice = pc.get("tiktok_isolate_voice") is True
     tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
     c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
     c.comment_image = pc.get("comment_image", True) is not False
@@ -571,7 +582,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
         c.caption_min_words = 1
     c.target_ids = ({str(x) for x in pc.get("target_page_ids") or []}
                     if pc.get("target_mode") == "selected" else None)
-    c.sources = {source_slug(u) for u in pc.get("sources") or []} - {""}
+    c.sources = {source_slug(u) for u in (pc.get("sources") or []) + (pc.get("tiktok_sources") or [])} - {""}
     c.backfill = pc.get("backfill") is True
     c.backfill_per_run = max(1, min(10, int(pc.get("backfill_per_run") or 2)))
     c.backfill_rotate_days = max(7, min(365, int(pc.get("backfill_rotate_days") or 30)))
