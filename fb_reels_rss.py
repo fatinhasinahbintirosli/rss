@@ -706,9 +706,10 @@ def postolab_sources(fetch=None) -> list[str]:
             continue
         for pc in (remote.get("settings") or {}).get("profiles", {}).values():
             if pc.get("enabled"):
-                out += [u for u in pc.get("sources") or [] if u not in out]
+                srcs = list(pc.get("sources") or []) + list(pc.get("tiktok_sources") or [])
+                out += [u for u in srcs if u not in out]
                 if pc.get("backfill") is True:
-                    BACKFILL_SOURCES.update(pc.get("sources") or [])
+                    BACKFILL_SOURCES.update(srcs)
     return out
 
 
