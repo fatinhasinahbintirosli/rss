@@ -155,6 +155,9 @@ class GeminiClient:
             if r.status_code not in (429, 500, 503):
                 return r
             body = r.text[:1000]
+            if r.status_code == 429 and re.search(r"spending cap|spend cap", body, re.I):
+                raise GeminiError("Had perbelanjaan BULANAN Gemini sudah dicapai (429). Naikkan had di "
+                                  "https://ai.studio/spend, kemudian tekan Cuba semula.")
             if r.status_code == 429 and re.search(r"PerDay|per day|daily", body, re.I):
                 raise GeminiError("Kuota HARIAN Gemini sudah habis (429). Ia akan pulih sendiri esok, "
                                   "atau naik taraf ke pelan berbayar di Google AI Studio.")

@@ -42,3 +42,10 @@ def test_daily_quota_not_retried(monkeypatch):
     c.s.request = lambda *a, **k: R(429, "Quota exceeded for metric GenerateRequestsPerDayPerProjectPerModel")
     with pytest.raises(g.GeminiError, match="HARIAN"):
         c.generate_json({"uri": "u"}, "p")
+
+
+def test_spend_cap_not_retried(monkeypatch):
+    c = client([], monkeypatch)
+    c.s.request = lambda *a, **k: R(429, '{"error": {"message": "Your project has exceeded its monthly spending cap."}}')
+    with pytest.raises(g.GeminiError, match="BULANAN"):
+        c.generate_json({"uri": "u"}, "p")
