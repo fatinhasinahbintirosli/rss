@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -142,9 +143,38 @@ class GeminiClient:
     def _h(self, extra: dict | None = None) -> dict:
         return {"x-goog-api-key": self.key, **(extra or {})}
 
+    RETRY_WAITS = (20, 45, 90)     # saat; 429 = terlalu banyak permintaan seminit → tunggu & cuba lagi
+
+    def _send(self, method: str, url: str, **kw) -> requests.Response:
+        """Permintaan ke Gemini dengan cubaan semula untuk 429 / 500 / 503 (had kadar seminit atau Gemini sibuk).
+        Had HARIAN (PerDay) tidak dicuba semula: sistem berhenti dan beri mesej jelas."""
+        for i, wait in enumerate((0,) + self.RETRY_WAITS):
+            if wait:
+                time.sleep(wait)
+            r = self.s.request(method, url, **kw)
+            if r.status_code not in (429, 500, 503):
+                return r
+            body = r.text[:1000]
+            if r.status_code == 429 and re.search(r"PerDay|per day|daily", body, re.I):
+                raise GeminiError("Kuota HARIAN Gemini sudah habis (429). Ia akan pulih sendiri esok, "
+                                  "atau naik taraf ke pelan berbayar di Google AI Studio.")
+            if i == len(self.RETRY_WAITS):
+                break
+            try:
+                wait_hdr = int(float(r.headers.get("retry-after") or 0))
+            except ValueError:
+                wait_hdr = 0
+            if wait_hdr > 0:
+                time.sleep(min(wait_hdr, 120))
+        if r.status_code == 429:
+            m = re.search(r'"quotaMetric"\s*:\s*"([^"]+)"', r.text or "")
+            raise GeminiError("Gemini terlalu sibuk / had kadar dicapai (429) walaupun sudah dicuba 4 kali"
+                              + (f" [{m.group(1).rsplit('/', 1)[-1]}]" if m else "") + ". Akan dicuba lagi kemudian.")
+        raise GeminiError(f"Gemini {r.status_code}: {r.text[:300]}")
+
     def upload(self, path: str, mime: str = "video/mp4") -> dict:
         size = os.path.getsize(path)
-        r = self.s.post(f"{BASE}/upload/v1beta/files", headers=self._h({
+        r = self._send("POST", f"{BASE}/upload/v1beta/files", headers=self._h({
             "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
             "X-Goog-Upload-Header-Content-Length": str(size), "X-Goog-Upload-Header-Content-Type": mime,
             "Content-Type": "application/json"}), json={"file": {"display_name": os.path.basename(path)}}, timeout=60)
@@ -169,7 +199,7 @@ class GeminiClient:
             if time.time() > deadline:
                 raise GeminiError("Gemini mengambil masa terlalu lama memproses video")
             time.sleep(poll)
-            r = self.s.get(f"{BASE}/v1beta/{file['name']}", headers=self._h(), timeout=30)
+            r = self._send("GET", f"{BASE}/v1beta/{file['name']}", headers=self._h(), timeout=30)
             r.raise_for_status()
             file = r.json()
 
@@ -187,8 +217,8 @@ class GeminiClient:
             ]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
         }
-        r = self.s.post(f"{BASE}/v1beta/models/{self.model}:generateContent",
-                        headers=self._h({"Content-Type": "application/json"}), json=body, timeout=600)
+        r = self._send("POST", f"{BASE}/v1beta/models/{self.model}:generateContent",
+                       headers=self._h({"Content-Type": "application/json"}), json=body, timeout=600)
         if r.status_code >= 400:
             raise GeminiError(f"Gemini {r.status_code}: {r.text[:300]}")
         j = r.json()
