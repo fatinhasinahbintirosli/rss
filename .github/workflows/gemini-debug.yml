@@ -1,0 +1,40 @@
+name: Gemini debug (sementara)
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -q requests
+      - env:
+          K: ${{ secrets.GEMINI_API_KEY }}
+          M: ${{ vars.GEMINI_MODEL }}
+        run: |
+          python - <<'PY'
+          import os, requests, json
+          k = os.environ["K"]; B = "https://generativelanguage.googleapis.com"
+          h = {"x-goog-api-key": k}
+          print("MODEL var:", os.environ.get("M") or "(lalai)")
+          n = size = 0; tok = ""; states = {}
+          for _ in range(50):
+              r = requests.get(f"{B}/v1beta/files", headers=h, params={"pageSize": 100, "pageToken": tok}, timeout=30)
+              if r.status_code != 200: print("LIST", r.status_code, r.text[:500]); break
+              j = r.json()
+              for f in j.get("files", []):
+                  n += 1; size += int(f.get("sizeBytes") or 0); states[f.get("state")] = states.get(f.get("state"), 0) + 1
+              tok = j.get("nextPageToken") or ""
+              if not tok: break
+          print("FILES", n, "GB", round(size/1e9, 2), states)
+          r = requests.post(f"{B}/upload/v1beta/files", headers={**h, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": "10", "X-Goog-Upload-Header-Content-Type": "video/mp4", "Content-Type": "application/json"},
+                json={"file": {"display_name": "t"}}, timeout=30)
+          print("UPLOAD-START", r.status_code, r.text[:800])
+          import re
+          src = open("postolab_relay.py").read() + open("video_checker/config.py").read() if os.path.exists("video_checker/config.py") else ""
+          m = os.environ.get("M") or (re.findall(r'gemini-[\w.\-]+', src) or ["gemini-2.5-flash"])[0]
+          r = requests.post(f"{B}/v1beta/models/{m}:generateContent", headers=h, json={"contents": [{"parts": [{"text": "hi"}]}]}, timeout=60)
+          print("GENERATE", m, r.status_code, r.text[:800])
+          PY
