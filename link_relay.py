@@ -709,6 +709,13 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         if vt_manual:
             rec["detail"]["video_text_manual"] = vt_manual
     overlay = {} if vt_mode != "off" else None
+    # Caption posting: setiap pautan boleh pilih (detail.caption_mode = ai | manual). Manual = teks sendiri,
+    # dipost seperti ditaip pada setiap page (tanpa AI, tanpa ayat penutup).
+    cap_manual = str(det.get("caption_manual") or "").strip()[:2000] if det.get("caption_mode") == "manual" else ""
+    if cap_manual:
+        rec["detail"]["caption_mode"] = "manual"              # kekal untuk cubaan semula
+        rec["detail"]["caption_manual"] = cap_manual
+        unique = False
 
     with tempfile.TemporaryDirectory() as td:
         v = fetcher(item["url"], td, int(env("LINK_MAX_MINUTES", "15") or 15), env("COOKIES_FILE"), env("PROXY_URL"))
@@ -721,13 +728,18 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
             v["path"] = music_remover(v["path"])
             rec["detail"]["music_removed"] = True
         context = " ".join(x for x in [v.get("title"), (v.get("description") or "")[:500]] if x)
-        ask, cleanup = ask_factory(settings, v["path"])
-        try:
-            caps, rejected = cap.generate(v["path"], len(targets) if unique else 1, context, history, ask,
-                                          max_words=max_words, min_words=min_words, suffix=suffix, short=short,
-                                          overlay=overlay)
-        finally:
-            cleanup()
+        if cap_manual and overlay is None:
+            caps, rejected = [cap_manual], []                 # caption sendiri, Gemini tidak diperlukan
+        else:
+            ask, cleanup = ask_factory(settings, v["path"])
+            try:
+                caps, rejected = cap.generate(v["path"], len(targets) if unique else 1, context, history, ask,
+                                              max_words=max_words, min_words=min_words, suffix=suffix, short=short,
+                                              overlay=overlay)
+            finally:
+                cleanup()
+            if cap_manual and caps:
+                caps = [cap_manual]                           # AI hanya untuk tulisan atas video
         if rejected:
             rec["detail"]["caption_rejected"] = rejected[:10]
         if not caps:
@@ -773,7 +785,8 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
     if rec["scheduled"] or already:
         rec["status"] = "posted"
         rec["error"] = None
-        history.extend(cap.clean_body(p["message"], [suffix]) for p in posts)
+        if not cap_manual:
+            history.extend(cap.clean_body(p["message"], [suffix]) for p in posts)
     else:
         reasons = ", ".join(sorted({s.get("reason", "") for s in res.get("skipped", [])})) or "tiada slot"
         rec["error"] = f"Tiada post dijadualkan ({reasons})."
