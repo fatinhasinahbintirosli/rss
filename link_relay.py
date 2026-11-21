@@ -756,12 +756,15 @@ def process_link(item: dict, pc: dict, pages: list[dict], settings: Settings, hi
         comment_img = None
         if comment and item.get("comment_image", True):
             comment_img = api.upload(screenshot(v["path"], v.get("duration") or 0), "image/jpeg")
-        upload_path = v["path"]
+        import branding
+        video_url, binfo = branding.finalize(v["path"], posts, targets, api, brand=pc.get("branding") is True,
+                                             overlay_data=(overlay or {}).get("data"), want_text=overlay is not None,
+                                             caps=caps, manual=vt_manual, log=log)
+        info = binfo.get("video_text") or {}
         if overlay is not None:
-            import video_text
-            upload_path, info = video_text.apply(v["path"], overlay.get("data"), caps, manual=vt_manual, log=log)
             rec["detail"]["video_text_result"] = {k: info.get(k) for k in ("text", "emoji", "position", "skip") if info.get(k)}
-        video_url = api.upload(upload_path)
+        if binfo.get("branding"):
+            rec["detail"]["branding"] = binfo["branding"]
 
     slots, stagger = slots_for(pc)
     if (item.get("schedule_mode") or "") == "next":

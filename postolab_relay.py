@@ -80,6 +80,7 @@ class Cfg:
         self.caption_unique = True              # True: caption berlainan setiap Page; False: satu caption untuk semua
         self.caption_original = "off"           # salin caption asal: off | append (bawah caption AI) | only (tanpa AI)
         self.video_text = False                 # tulisan atas video (AI tulis, kotak kuning)
+        self.branding = False                   # logo (gambar profil) + nama page di kiri atas, setiap page
         self.isolate_voice = False              # video TikTok: buang muzik, kekal suara (Demucs)
         self.comment_text = None                # komen pertama (teks template), None = tiada
         self.comment_image = True               # sertakan screenshot video dalam komen pertama
@@ -502,20 +503,20 @@ def process_reel(item: dict, pages: list[dict], cfg: Cfg, settings: Settings, st
                 from link_relay import screenshot          # import lewat: elak import bulat
                 comment_img = api.upload(screenshot(path), "image/jpeg")
 
-        upload_path = path
-        if overlay is not None:
+        if overlay is not None and cfg.dry_run:
             import video_text
-            if cfg.dry_run:
-                rec["video_text"] = video_text.plan(overlay.get("data"), caps)
-            else:
-                upload_path, rec["video_text"] = video_text.apply(path, overlay.get("data"), caps, log=log)
+            rec["video_text"] = video_text.plan(overlay.get("data"), caps)
 
         if cfg.dry_run:
             rec.update(status="green", scheduled=[{"page": next(x["page_name"] for x in targets
                                                                if str(x["page_id"]) == p["pageId"]),
                                                    "message": p["message"], "when": "(dry run)"} for p in posts])
             return rec
-        video_url = api.upload(upload_path)
+        import branding
+        video_url, binfo = branding.finalize(path, posts, targets, api, brand=cfg.branding,
+                                             overlay_data=(overlay or {}).get("data"), want_text=overlay is not None,
+                                             caps=caps, log=log)
+        rec.update({k: v for k, v in binfo.items() if k in ("video_text", "branding")})
 
     res = api.schedule(video_url, item.get("sid") or item["id"], posts, cfg.profile, cfg.stagger, cfg.slots,
                        first_comment=cfg.comment_text, comment_image_url=comment_img)
@@ -567,6 +568,7 @@ def profile_cfg(base: Cfg, name: str, gl: dict, pc: dict, rows: dict, templates:
     c.caption_unique = pc.get("caption_unique", True) is not False
     c.caption_original = pc.get("caption_original") if pc.get("caption_original") in ("append", "only") else "off"
     c.video_text = pc.get("video_text") is True
+    c.branding = pc.get("branding") is True
     c.isolate_voice = pc.get("tiktok_isolate_voice") is True
     tpl = next((t for t in templates or [] if t.get("id") and t.get("id") == pc.get("comment_id")), None)
     c.comment_text = (tpl.get("text") or "").strip() or None if tpl else None
